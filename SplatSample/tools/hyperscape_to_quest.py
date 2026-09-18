@@ -160,6 +160,34 @@ def decimate_uniform(data, hdr, target):
     return _gather(data, hdr, keep)
 
 
+def inflate_scales(data, hdr, factor):
+    """Multiply each Gaussian's 3D sigma by factor (hole-filling).
+
+    Mirrors vkraygs PR ckeisc/vkraygs#2 (final inflate-only state), where the
+    same scaling is a GPU shader uniform defaulting to 1.3. SPZ v2 stores
+    sigma = exp(byte/16 - 10), so adding round(16*ln(factor)) to each scale
+    byte scales sigma by ~factor. factor=1.0 is a no-op.
+
+    NOTE: not idempotent — re-baking an inflated file inflates again.
+    """
+    import math
+    import numpy as np
+    if factor <= 0:
+        raise ValueError(f'inflate factor must be positive, got {factor}')
+    if factor == 1.0:
+        return data
+    n = hdr['n']
+    delta = int(round(16 * math.log(factor)))
+    if delta == 0:
+        return data
+    out = bytearray(data)
+    base = 16 + n * (9 + 1 + 3)  # header + positions + alphas + colors
+    scales = np.frombuffer(out, dtype=np.uint8, offset=base, count=3 * n)
+    scales[:] = np.clip(scales.astype(np.int16) + delta, 0, 255).astype(np.uint8)
+    print(f'inflate x{factor}: sigma scaled (+{delta} on log-scale bytes)')
+    return bytes(out)
+
+
 def spawn_from_camera_poses(poses_path):
     """Derive a spawn pose from the capture's camera poses.
 
@@ -229,6 +257,9 @@ def main():
                     help='drop splats visible from fewer than K of 64 clusters (0=keep all)')
     ap.add_argument('--max-splats', type=int, default=0,
                     help='uniform-decimate to N splats (0=no decimation)')
+    ap.add_argument('--inflate', type=float, default=1.3,
+                    help="hole-filling: multiply each Gaussian's 3D sigma by F "
+                         '(1.0=off); mirrors vkraygs PR ckeisc/vkraygs#2')
     ap.add_argument('--name', default=None)
     args = ap.parse_args()
 
@@ -247,6 +278,11 @@ def main():
     if args.max_splats > 0 and n > args.max_splats:
         data, n = decimate_uniform(data, hdr, args.max_splats)
         hdr = dict(hdr, n=n)
+
+    # Hole-filling: inflate 3D sigma (vkraygs#2). Must run on the raw bytes
+    # before dc_bake gzips; not idempotent, so never re-bake an inflated file.
+    if args.inflate != 1.0:
+        data = inflate_scales(data, hdr, args.inflate)
 
     baked = dc_bake(data, hdr, zero_sh=not args.strip_sh_degree)
     print(f'DC-bake done (zero_sh={not args.strip_sh_degree}), '
@@ -273,6 +309,7 @@ def main():
         'splat_count': n,
         'dc_baked': True,
         'sh_mode': 'stripped' if args.strip_sh_degree else 'neutral-128',
+        'inflate': args.inflate,
         'spawn': spawn,
         'has_thumbnail': has_thumb,
         'source': {'sh_degree': hdr['sh_degree'], 'note': 'Hyperscape SPZ: non-standard SH basis; baked to DC-only'},
