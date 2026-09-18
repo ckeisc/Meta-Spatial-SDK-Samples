@@ -91,7 +91,7 @@ private val panelInstructionText = buildAnnotatedString {
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("B") }
   append(" to recenter the view. \nTap ")
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("Open capture folder…") }
-  append(" to import a baked capture from device storage.")
+  append(" to import a capture — baked, or a raw Hyperscape bundle (baked on device).")
 }
 
 @Composable

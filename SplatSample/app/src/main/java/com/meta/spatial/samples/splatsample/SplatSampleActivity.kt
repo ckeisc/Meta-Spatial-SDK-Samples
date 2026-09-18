@@ -131,10 +131,12 @@ class SplatSampleActivity : AppSystemActivity() {
         if (granted) refreshCaptures()
       }
 
-  // System folder picker for importing a baked capture without adb. The
-  // picked tree is COPIED into the app's own HyperscapeCaptures dir (not
-  // referenced in place), because Splat() takes file:// / apk:// URIs and
-  // may not understand the picker's content:// URIs.
+  // System folder picker for importing a capture without adb. The picked
+  // tree is COPIED into the app's own HyperscapeCaptures dir (not referenced
+  // in place), because Splat() takes file:// / apk:// URIs and may not
+  // understand the picker's content:// URIs. Already-baked folders
+  // (capture.json + .spz) are used as-is; raw Hyperscape bundles are baked
+  // on device first (see HyperscapeBake.kt).
   private val folderPickerLauncher =
       registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
         if (treeUri != null) importCaptureFolder(treeUri)
@@ -231,10 +233,16 @@ class SplatSampleActivity : AppSystemActivity() {
   }
 
   /**
-   * Copies a picked capture folder (capture.json + .spz + optional thumb.jpg)
-   * into the app-specific HyperscapeCaptures dir, then rescans and selects
-   * the new capture. The copy runs off the main thread; the panel shows an
-   * "Importing…" state meanwhile. Shows a Toast on success or failure.
+   * Copies a picked folder into the app-specific HyperscapeCaptures dir,
+   * then rescans and selects the new capture. Two kinds of folders are
+   * accepted:
+   * - already-baked (capture.json + .spz): used as-is;
+   * - raw Hyperscape bundle (.spz + camera poses + cluster files): baked on
+   *   device first (DC-bake, outlier filter, spawn, manifest), so Meta's
+   *   renderer shows correct colors with no PC step.
+   *
+   * The copy + bake run off the main thread; the panel shows an "Importing…"
+   * state meanwhile. Shows a Toast on success or failure.
    */
   private fun importCaptureFolder(treeUri: Uri) {
     isImportingCapture.value = true
@@ -246,31 +254,29 @@ class SplatSampleActivity : AppSystemActivity() {
         val tree =
             DocumentFile.fromTreeUri(this@SplatSampleActivity, treeUri)
                 ?: throw IllegalArgumentException("cannot open picked folder")
-        val files = tree.listFiles().filter { it.isFile }
-        if (files.none { it.name == "capture.json" }) {
-          throw IllegalArgumentException("picked folder has no capture.json")
-        }
-        if (files.none { it.name?.endsWith(".spz", ignoreCase = true) == true }) {
-          throw IllegalArgumentException("picked folder has no .spz")
-        }
         val filesRoot =
             getExternalFilesDir(null) ?: throw IllegalStateException("no external files dir")
-        val dirName = (tree.name ?: "capture").replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val rawName = tree.name ?: "capture"
+        val dirName = rawName.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val dest = File(filesRoot, "HyperscapeCaptures/$dirName").apply { mkdirs() }
-        for (f in files) {
+        var copied = 0
+        for (f in tree.listFiles()) {
+          if (!f.isFile) continue
           val name = f.name ?: continue
-          // Only the bake outputs; skip stray files like .DS_Store.
-          if (name != "capture.json" &&
-              !name.endsWith(".spz", ignoreCase = true) &&
-              name != "thumb.jpg") {
-            continue
-          }
           contentResolver.openInputStream(f.uri)?.use { input ->
             File(dest, name).outputStream().use { input.copyTo(it) }
           } ?: throw IOException("cannot read $name")
+          copied++
+        }
+        if (copied == 0) throw IllegalArgumentException("picked folder is empty")
+        if (File(dest, "capture.json").isFile) {
+          Log.i("SplatSample", "Imported baked capture folder '$dirName'")
+        } else {
+          Log.i("SplatSample", "No capture.json in '$dirName'; baking on device…")
+          val result = bakeHyperscapeBundle(dest, name = rawName)
+          Log.i("SplatSample", "Baked '${result.id}': ${result.splatCount} splats")
         }
         importedDir = dirName
-        Log.i("SplatSample", "Imported capture folder '$dirName' from picker")
       } catch (e: Exception) {
         Log.w("SplatSample", "Capture import failed", e)
       }
@@ -291,7 +297,7 @@ class SplatSampleActivity : AppSystemActivity() {
         } else {
           Toast.makeText(
                   this@SplatSampleActivity,
-                  "Import failed — pick a baked capture folder (capture.json + .spz)",
+                  "Import failed — pick a baked capture folder or a raw Hyperscape bundle (.spz)",
                   Toast.LENGTH_LONG)
               .show()
         }

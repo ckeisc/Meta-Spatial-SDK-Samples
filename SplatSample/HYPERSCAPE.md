@@ -117,10 +117,16 @@ in front of you. First load takes a few seconds (357k splats decode).
 Two ways to get baked captures onto the device:
 
 **Option 0 — in-headset (no adb):** tap **"Open capture folder…"** on the
-control panel. The system folder picker opens; choose a baked capture folder
-(`capture.json` + `<id>.spz`, e.g. copied to Downloads). The app copies it
-into its own `HyperscapeCaptures` dir, rescans, and loads it — a Toast
-confirms the import, or explains why it failed.
+control panel. The system folder picker opens; choose a capture folder. Two
+kinds are accepted:
+- **Baked** (`capture.json` + `<id>.spz`, as the PC script writes): used as-is.
+- **Raw Hyperscape bundle** (`<id>.spz` + `<id>_camera_poses.bin` + optional
+  cluster files / flyby mp4, as `splat_fetch.py` downloads): the app bakes it
+  on device — DC-bake, outlier filter, spawn pose, manifest — so no PC step
+  is needed. Thumbnail comes from the flyby mp4 via MediaMetadataRetriever.
+
+The app copies the folder into its own `HyperscapeCaptures` dir, rescans,
+and loads it — a Toast confirms the import, or explains why it failed.
 
 **adb push** still works too — the app scans device storage for baked
 captures at startup, so new scans can be tried without another
@@ -151,3 +157,4 @@ up on the next launch.
 | `.../splatsample/Capture.kt` | Capture loading: APK assets + device storage (`Documents/HyperscapeCaptures`, app files dir) |
 | `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter, Documents permission, folder-picker import |
 | `.../splatsample/SplatControlPanel.kt` | Scrollable capture picker + thumbnails + "Open capture folder…" button |
+| `.../splatsample/HyperscapeBake.kt` | On-device port of the bake script: SPZ v2 parse, DC-bake, outlier/visibility filters, decimation, spawn from camera poses, thumbnail via MediaMetadataRetriever, `capture.json` manifest |
