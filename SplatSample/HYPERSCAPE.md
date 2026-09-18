@@ -114,9 +114,18 @@ in front of you. First load takes a few seconds (357k splats decode).
 
 ## Sideload captures without rebuilding (Quest 3)
 
-The app scans device storage for baked captures at startup, so new scans can
-be tried without another `assembleDebug` cycle. Bake on the PC as usual, then
-push the capture folder to either location:
+Two ways to get baked captures onto the device:
+
+**Option 0 — in-headset (no adb):** tap **"Open capture folder…"** on the
+control panel. The system folder picker opens; choose a baked capture folder
+(`capture.json` + `<id>.spz`, e.g. copied to Downloads). The app copies it
+into its own `HyperscapeCaptures` dir, rescans, and loads it — a Toast
+confirms the import, or explains why it failed.
+
+**adb push** still works too — the app scans device storage for baked
+captures at startup, so new scans can be tried without another
+`assembleDebug` cycle. Bake on the PC as usual, then push the capture folder
+to either location:
 
 ```powershell
 # Option A — Documents (shared folder; the app asks for read access on first launch)
@@ -140,5 +149,5 @@ up on the next launch.
 | `SplatSample/tools/hyperscape_to_quest.py` | PC bake script (SPZ v2 parser, DC-bake, outlier filter, spawn, manifest) |
 | `SplatSample/app/src/main/assets/captures/` | Baked captures bundled in the APK (git-ignored; personal scan data) |
 | `.../splatsample/Capture.kt` | Capture loading: APK assets + device storage (`Documents/HyperscapeCaptures`, app files dir) |
-| `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter, Documents permission |
-| `.../splatsample/SplatControlPanel.kt` | Scrollable capture picker + thumbnails |
+| `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter, Documents permission, folder-picker import |
+| `.../splatsample/SplatControlPanel.kt` | Scrollable capture picker + thumbnails + "Open capture folder…" button |

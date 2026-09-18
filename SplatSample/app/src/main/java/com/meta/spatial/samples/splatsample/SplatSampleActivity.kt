@@ -8,18 +8,21 @@
 package com.meta.spatial.samples.splatsample
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
 import com.meta.spatial.compose.ComposeFeature
 import com.meta.spatial.compose.ComposeViewPanelRegistration
 import com.meta.spatial.core.Entity
@@ -60,11 +63,13 @@ import com.meta.spatial.toolkit.Visible
 import com.meta.spatial.toolkit.createPanelEntity
 import com.meta.spatial.vr.VRFeature
 import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** SharedPreferences key for the last splat the user picked in the panel. */
 private const val KEY_SELECTED_SPLAT = "selected_splat_index"
@@ -107,6 +112,12 @@ class SplatSampleActivity : AppSystemActivity() {
    */
   private var isPanelInteractive = mutableStateOf(true)
   private val delayVisibilityMS = 2000L
+  /**
+   * True while a capture folder picked through the system folder picker is
+   * being copied into the app's HyperscapeCaptures dir. The panel shows an
+   * "Importing…" state and disables the picker meanwhile.
+   */
+  private var isImportingCapture = mutableStateOf(false)
 
   // Remembers which splat the user picked so the next launch opens on it
   // instead of always defaulting to the first entry.
@@ -118,6 +129,15 @@ class SplatSampleActivity : AppSystemActivity() {
       registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         Log.i("SplatSample", "Documents permission granted=$granted")
         if (granted) refreshCaptures()
+      }
+
+  // System folder picker for importing a baked capture without adb. The
+  // picked tree is COPIED into the app's own HyperscapeCaptures dir (not
+  // referenced in place), because Splat() takes file:// / apk:// URIs and
+  // may not understand the picker's content:// URIs.
+  private val folderPickerLauncher =
+      registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
+        if (treeUri != null) importCaptureFolder(treeUri)
       }
 
   // Rotation applied to the Splat to align it with the scene coordinate system
@@ -207,6 +227,75 @@ class SplatSampleActivity : AppSystemActivity() {
       Log.i(
           "SplatSample",
           "Captures: ${deviceCaptures.size} on device, ${assetCaptures.size} in assets")
+    }
+  }
+
+  /**
+   * Copies a picked capture folder (capture.json + .spz + optional thumb.jpg)
+   * into the app-specific HyperscapeCaptures dir, then rescans and selects
+   * the new capture. The copy runs off the main thread; the panel shows an
+   * "Importing…" state meanwhile. Shows a Toast on success or failure.
+   */
+  private fun importCaptureFolder(treeUri: Uri) {
+    isImportingCapture.value = true
+    activityScope.launch(Dispatchers.IO) {
+      var importedDir: String? = null
+      try {
+        contentResolver.takePersistableUriPermission(
+            treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val tree =
+            DocumentFile.fromTreeUri(this@SplatSampleActivity, treeUri)
+                ?: throw IllegalArgumentException("cannot open picked folder")
+        val files = tree.listFiles().filter { it.isFile }
+        if (files.none { it.name == "capture.json" }) {
+          throw IllegalArgumentException("picked folder has no capture.json")
+        }
+        if (files.none { it.name?.endsWith(".spz", ignoreCase = true) == true }) {
+          throw IllegalArgumentException("picked folder has no .spz")
+        }
+        val filesRoot =
+            getExternalFilesDir(null) ?: throw IllegalStateException("no external files dir")
+        val dirName = (tree.name ?: "capture").replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val dest = File(filesRoot, "HyperscapeCaptures/$dirName").apply { mkdirs() }
+        for (f in files) {
+          val name = f.name ?: continue
+          // Only the bake outputs; skip stray files like .DS_Store.
+          if (name != "capture.json" &&
+              !name.endsWith(".spz", ignoreCase = true) &&
+              name != "thumb.jpg") {
+            continue
+          }
+          contentResolver.openInputStream(f.uri)?.use { input ->
+            File(dest, name).outputStream().use { input.copyTo(it) }
+          } ?: throw IOException("cannot read $name")
+        }
+        importedDir = dirName
+        Log.i("SplatSample", "Imported capture folder '$dirName' from picker")
+      } catch (e: Exception) {
+        Log.w("SplatSample", "Capture import failed", e)
+      }
+      withContext(Dispatchers.Main) {
+        isImportingCapture.value = false
+        val dirName = importedDir
+        if (dirName != null) {
+          refreshCaptures()
+          val idx = capturesState.value.indexOfFirst { it.deviceDir?.name == dirName }
+          if (idx >= 0) {
+            loadSplat(effectiveSplatList()[idx])
+            Toast.makeText(
+                    this@SplatSampleActivity,
+                    "Imported '${capturesState.value[idx].name}'",
+                    Toast.LENGTH_SHORT)
+                .show()
+          }
+        } else {
+          Toast.makeText(
+                  this@SplatSampleActivity,
+                  "Import failed — pick a baked capture folder (capture.json + .spz)",
+                  Toast.LENGTH_LONG)
+              .show()
+        }
+      }
     }
   }
 
@@ -520,7 +609,9 @@ class SplatSampleActivity : AppSystemActivity() {
               capturesState.value,
               selectedIndex,
               isPanelInteractive,
-              ::loadSplat)
+              isImportingCapture,
+              ::loadSplat,
+              onOpenFolder = { folderPickerLauncher.launch(null) })
         },
     )
   }

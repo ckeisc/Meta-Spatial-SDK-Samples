@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
@@ -88,7 +89,9 @@ private val panelInstructionText = buildAnnotatedString {
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("A") }
   append(" to snap the panel in front of you. \nPress ")
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("B") }
-  append(" to recenter the view.")
+  append(" to recenter the view. \nTap ")
+  withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("Open capture folder…") }
+  append(" to import a baked capture from device storage.")
 }
 
 @Composable
@@ -97,7 +100,9 @@ fun ControlPanel(
     captures: List<HyperscapeCapture>,
     selectedIndex: MutableState<Int>,
     isPanelInteractive: State<Boolean>,
+    isImporting: State<Boolean>,
     loadSplatFunction: (String) -> Unit,
+    onOpenFolder: () -> Unit,
 ) {
   // Apply SpatialTheme to ensure consistent design across the panel
   SpatialTheme(colorScheme = getPanelTheme()) {
@@ -222,6 +227,20 @@ fun ControlPanel(
               )
             }
           }
+        }
+
+        // Folder import: system picker for a baked capture folder (capture.json
+        // + .spz). The activity copies it into the app's HyperscapeCaptures
+        // dir and rescans; the picker then shows the new capture. Disabled
+        // while a splat is loading or an import is in progress.
+        Button(
+            onClick = onOpenFolder,
+            enabled = isPanelInteractive.value && !isImporting.value,
+        ) {
+          Text(
+              text = if (isImporting.value) "Importing capture…" else "Open capture folder…",
+              style = SpatialTheme.typography.body1,
+          )
         }
       } // End content column
     } // End main container
