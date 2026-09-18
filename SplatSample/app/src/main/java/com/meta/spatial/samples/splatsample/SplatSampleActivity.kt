@@ -60,9 +60,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+/** SharedPreferences key for the last splat the user picked in the panel. */
+private const val KEY_SELECTED_SPLAT = "selected_splat_index"
+
 @OptIn(SpatialSDKExperimentalSplatAPI::class)
 class SplatSampleActivity : AppSystemActivity() {
-
   private var gltfxEntity: Entity? = null
   private val activityScope = CoroutineScope(Dispatchers.Main)
 
@@ -92,6 +94,11 @@ class SplatSampleActivity : AppSystemActivity() {
    */
   private var isPanelInteractive = mutableStateOf(true)
   private val delayVisibilityMS = 2000L
+
+  // Remembers which splat the user picked so the next launch opens on it
+  // instead of always defaulting to the first entry.
+  private val prefs by lazy { getSharedPreferences("splat_sample_prefs", MODE_PRIVATE) }
+
   // Rotation applied to the Splat to align it with the scene coordinate system
   // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space.
   // Hyperscape captures are Z-up like the sample's own assets, so the same rotation applies.
@@ -126,7 +133,10 @@ class SplatSampleActivity : AppSystemActivity() {
       splatList = hyperscapeCaptures.map { it.splatUri }
       Log.i("SplatSample", "Using ${hyperscapeCaptures.size} Hyperscape capture(s)")
     }
-    defaultSplatPath = splatList[0].toUri()
+    // Restore the user's last pick (clamped in case the bundled set changed);
+    // fall back to the first splat on a fresh install.
+    selectedIndex.value = prefs.getInt(KEY_SELECTED_SPLAT, 0).coerceIn(splatList.indices)
+    defaultSplatPath = splatList[selectedIndex.value].toUri()
     NetworkedAssetLoader.init(
         File(applicationContext.getCacheDir().canonicalPath),
         OkHttpAssetFetcher(),
@@ -248,6 +258,13 @@ class SplatSampleActivity : AppSystemActivity() {
    * @param newSplatPath Path to the .spz Splat file (e.g., "apk://MySplat.spz" or a URL)
    */
   fun loadSplat(newSplatPath: String) {
+    // Remember the pick so the next launch restores it (single source of
+    // truth for selectedIndex; the panel also sets it on tap).
+    val newIndex = splatList.indexOf(newSplatPath)
+    if (newIndex >= 0) {
+      selectedIndex.value = newIndex
+      prefs.edit().putInt(KEY_SELECTED_SPLAT, newIndex).apply()
+    }
 
     if (splatEntity.hasComponent<Splat>()) {
       // Entity exists with a Splat component

@@ -38,6 +38,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -128,23 +130,22 @@ fun ControlPanel(
             modifier = Modifier.padding(top = 8.dp),
         )
 
-        // Dynamically generated load options with large preview images
-        // DYNAMIC UI GENERATION:
-        // - Creates large, clickable preview images side by side
-        // - Images are the dominant UI element with blue border when selected
-        // - Labels appear below each corresponding image
-        Row(
+        // Capture picker: one tappable tile per splat. A LazyRow (not a fixed
+        // Row) so the list scrolls horizontally as the capture library grows
+        // instead of squeezing every tile. Tapping a tile swaps the splat at
+        // runtime; the activity persists the choice for the next launch.
+        LazyRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
+            contentPadding = PaddingValues(horizontal = 8.dp),
         ) {
-          // val currentIndex = splatManager.getCurrentSplatIndex()
-          splatList.forEachIndexed { index, option ->
+          itemsIndexed(splatList) { index, option ->
             // Each splat option is displayed as a column with image above button
             val isSelected = (index == selectedIndex.value)
             // When bundled Hyperscape captures back the list, index aligns with captures.
             val capture = captures.getOrNull(index)
             Column(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.width(240.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
