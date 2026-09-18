@@ -10,7 +10,7 @@ composeActivity = "1.9.2"
 lifecycleRuntimeKtx = "2.8.6"
 composeBom = "2024.09.03"
 documentfile = "1.0.1"
-media3 = "1.5.1"
+media3 = "1.4.1"
 
 
 
