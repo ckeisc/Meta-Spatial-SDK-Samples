@@ -65,6 +65,10 @@ committed) — they live only in your local checkout for building.
   its built-in Menlo Park / Los Angeles demos, unchanged.
 - `SplatSampleActivity.kt`:
   - `splatList` is built from bundled captures when present.
+  - No default 3D scene: the sample's `Composition.glxf` (Environment/Floor)
+    is no longer inflated and the skydome skybox is gone — the app shows only
+    the splat and the control panel. The scene export was removed from
+    `app/build.gradle.kts`; the inert sources remain under `app/scenes/`.
   - `recenterScene()` (B button, and after each load) spawns the user at the
     capture camera's start pose from `camera_poses` (position + heading) and
     puts the control panel 1.5 m ahead of it. `setViewOrigin` takes the

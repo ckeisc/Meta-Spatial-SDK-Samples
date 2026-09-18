@@ -95,9 +95,6 @@ dependencies {
   implementation(libs.androidx.material.icons.extended)
 }
 
-val projectDir = layout.projectDirectory
-val sceneDirectory = projectDir.dir("scenes")
-
 spatial {
   allowUsageDataCollection.set(true)
   scenes {
@@ -105,12 +102,6 @@ spatial {
 
     // cliPath.set("/Applications/Meta Spatial Editor.app/Contents/MacOS/CLI")
 
-    exportItems {
-      item {
-        projectPath.set(sceneDirectory.file("Main.metaspatial"))
-        outputPath.set(projectDir.dir("src/main/assets/scenes"))
-      }
-    }
     hotReload {
       appPackage.set("com.meta.spatial.samples.splatsample")
       appMainActivity.set(".SplatSampleActivity")

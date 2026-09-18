@@ -36,7 +36,6 @@ import com.meta.spatial.core.Vector3
 import com.meta.spatial.okhttp3.OkHttpAssetFetcher
 import com.meta.spatial.runtime.ButtonBits
 import com.meta.spatial.runtime.NetworkedAssetLoader
-import com.meta.spatial.runtime.SceneMaterial
 import com.meta.spatial.splat.SpatialSDKExperimentalSplatAPI
 import com.meta.spatial.splat.Splat
 import com.meta.spatial.splat.SplatFeature
@@ -45,12 +44,8 @@ import com.meta.spatial.toolkit.AppSystemActivity
 import com.meta.spatial.toolkit.AvatarAttachment
 import com.meta.spatial.toolkit.Controller
 import com.meta.spatial.toolkit.DpPerMeterDisplayOptions
-import com.meta.spatial.toolkit.GLXFInfo
 import com.meta.spatial.toolkit.Grabbable
 import com.meta.spatial.toolkit.GrabbableType
-import com.meta.spatial.toolkit.Material
-import com.meta.spatial.toolkit.Mesh
-import com.meta.spatial.toolkit.MeshCollision
 import com.meta.spatial.toolkit.PanelRegistration
 import com.meta.spatial.toolkit.PanelStyleOptions
 import com.meta.spatial.toolkit.QuadShapeOptions
@@ -65,7 +60,6 @@ import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,13 +69,9 @@ private const val KEY_SELECTED_SPLAT = "selected_splat_index"
 
 @OptIn(SpatialSDKExperimentalSplatAPI::class)
 class SplatSampleActivity : AppSystemActivity() {
-  private var gltfxEntity: Entity? = null
   private val activityScope = CoroutineScope(Dispatchers.Main)
 
-  private lateinit var environmentEntity: Entity
-  private lateinit var skyboxEntity: Entity
   private lateinit var panelEntity: Entity
-  private lateinit var floorEntity: Entity
   // Entity that holds the Splat component for rendering Gaussian Splats
   private lateinit var splatEntity: Entity
 
@@ -211,32 +201,17 @@ class SplatSampleActivity : AppSystemActivity() {
         File(applicationContext.getCacheDir().canonicalPath),
         OkHttpAssetFetcher(),
     )
-    skyboxEntity =
-        Entity.create(
-            listOf(
-                Mesh(Uri.parse("mesh://skybox"), hittable = MeshCollision.NoCollision),
-                Material().apply {
-                  baseTextureAndroidResourceId = R.drawable.skydome
-                  unlit = true
-                },
-                Transform(Pose(Vector3(x = 0f, y = 0f, z = 0f))),
-            ),
-        )
     panelEntity =
         Entity.createPanelEntity(
             R.id.control_panel,
             Transform(Pose(Vector3(0f, panelHeight, 0f), Quaternion(0f, 180f, 0f))),
             Grabbable(type = GrabbableType.PIVOT_Y, minHeight = 0.75f, maxHeight = 2.5f),
         )
-    loadGLXF { composition ->
-      environmentEntity = composition.getNodeByName("Environment").entity
-      val environmentMesh = environmentEntity.getComponent<Mesh>()
-      environmentMesh.defaultShaderOverride = SceneMaterial.UNLIT_SHADER
-      environmentEntity.setComponent(environmentMesh)
-      floorEntity = composition.getNodeByName("Floor").entity
-      initializeSplat(defaultSplatPath)
-      setSplatVisibility(false)
-    }
+    // No default 3D scene: the sample shows only the splat and the control
+    // panel. (The Composition.glxf Environment/Floor and the skydome skybox
+    // were removed; see HYPERSCAPE.md.)
+    initializeSplat(defaultSplatPath)
+    setSplatVisibility(false)
     // Ask for Documents access so captures can be sideloaded to
     // Documents/HyperscapeCaptures without rebuilding the APK. The
     // app-specific external files dir works without this permission.
@@ -552,13 +527,6 @@ class SplatSampleActivity : AppSystemActivity() {
 
     // Update the Visible Component on the Entity with a Splat Component
     splatEntity.setComponent(Visible(isSplatVisible))
-    // Show environment when the Splat is hidden, hide when the Splat is visible
-    setEnvironmentVisiblity(!isSplatVisible)
-  }
-
-  fun setEnvironmentVisiblity(isVisible: Boolean) {
-    environmentEntity.setComponent(Visible(isVisible))
-    skyboxEntity.setComponent(Visible(isVisible))
   }
 
   fun recenterScene() {
@@ -723,18 +691,6 @@ class SplatSampleActivity : AppSystemActivity() {
               })
         },
     )
-  }
-
-  private fun loadGLXF(onLoaded: ((GLXFInfo) -> Unit) = {}): Job {
-    gltfxEntity = Entity.create()
-    return activityScope.launch {
-      glXFManager.inflateGLXF(
-          Uri.parse("apk:///scenes/Composition.glxf"),
-          rootEntity = gltfxEntity!!,
-          keyName = "example_key_name",
-          onLoaded = onLoaded,
-      )
-    }
   }
 
   private fun createSimpleComposePanel(
