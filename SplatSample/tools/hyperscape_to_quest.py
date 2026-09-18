@@ -218,7 +218,12 @@ def spawn_from_camera_poses(poses_path):
         raise ValueError('no input_poses in camera poses file')
     p = np.array(poses[0], dtype=np.float64)  # 4x4 camera-to-world
     center_w = p[:3, 3]
-    fwd_w = p[:3, :3] @ np.array([0.0, 0.0, 1.0])  # COLMAP camera looks down +z
+    # View direction = camera -z axis. Evidence (garage capture, 2026-09-18):
+    # -z aligns with the direction of travel over the first poses
+    # (dot = 0.997) and points from the start position into the bulk of the
+    # scene; +z would face the near wall with the garage behind the camera.
+    # (These poses are NOT COLMAP +z-forward despite the JSON schema.)
+    fwd_w = p[:3, :3] @ np.array([0.0, 0.0, -1.0])
     # Hyperscape world (Z-up) -> SDK (Y-up) via R_x(-90): (x,y,z)->(x,z,-y)
     pos = [float(center_w[0]), float(center_w[2]), float(-center_w[1])]
     fwd = np.array([fwd_w[0], fwd_w[2], -fwd_w[1]])
