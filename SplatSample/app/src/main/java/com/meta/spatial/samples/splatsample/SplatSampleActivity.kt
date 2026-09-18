@@ -16,7 +16,6 @@ import android.os.Bundle
 import android.os.Environment
 import android.util.Log
 import android.widget.Toast
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
@@ -123,24 +122,34 @@ class SplatSampleActivity : AppSystemActivity() {
   // instead of always defaulting to the first entry.
   private val prefs by lazy { getSharedPreferences("splat_sample_prefs", MODE_PRIVATE) }
 
-  // Asks for read access to Documents/ so captures can be sideloaded there.
-  // On grant the capture list is rescanned and the picker updates.
-  private val documentsPermissionLauncher =
-      registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        Log.i("SplatSample", "Documents permission granted=$granted")
-        if (granted) refreshCaptures()
-      }
+  // VrActivity extends android.app.Activity (not ComponentActivity), so the
+  // Activity Result API is unavailable; use the framework callbacks below.
+  private companion object {
+    private const val REQ_DOCUMENTS_PERMISSION = 1001
+    private const val REQ_OPEN_CAPTURE_FOLDER = 1002
+  }
 
-  // System folder picker for importing a capture without adb. The picked
-  // tree is COPIED into the app's own HyperscapeCaptures dir (not referenced
-  // in place), because Splat() takes file:// / apk:// URIs and may not
-  // understand the picker's content:// URIs. Already-baked folders
-  // (capture.json + .spz) are used as-is; raw Hyperscape bundles are baked
-  // on device first (see HyperscapeBake.kt).
-  private val folderPickerLauncher =
-      registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { treeUri ->
-        if (treeUri != null) importCaptureFolder(treeUri)
-      }
+  @Deprecated("framework callback required by VrActivity base class")
+  override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    super.onActivityResult(requestCode, resultCode, data)
+    if (requestCode == REQ_OPEN_CAPTURE_FOLDER && resultCode == RESULT_OK) {
+      data?.data?.let { importCaptureFolder(it) }
+    }
+  }
+
+  override fun onRequestPermissionsResult(
+      requestCode: Int,
+      permissions: Array<out String>,
+      grantResults: IntArray
+  ) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode == REQ_DOCUMENTS_PERMISSION) {
+      val granted =
+          grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+      Log.i("SplatSample", "Documents permission granted=$granted")
+      if (granted) refreshCaptures()
+    }
+  }
 
   // Rotation applied to the Splat to align it with the scene coordinate system
   // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space.
@@ -211,7 +220,8 @@ class SplatSampleActivity : AppSystemActivity() {
     // Documents/HyperscapeCaptures without rebuilding the APK. The
     // app-specific external files dir works without this permission.
     if (!hasDocumentsAccess() && Build.VERSION.SDK_INT <= 32) {
-      documentsPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+      requestPermissions(
+          arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), REQ_DOCUMENTS_PERMISSION)
     }
   }
 
@@ -617,7 +627,11 @@ class SplatSampleActivity : AppSystemActivity() {
               isPanelInteractive,
               isImportingCapture,
               ::loadSplat,
-              onOpenFolder = { folderPickerLauncher.launch(null) })
+              onOpenFolder = {
+                @Suppress("DEPRECATION")
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_OPEN_CAPTURE_FOLDER)
+              })
         },
     )
   }
