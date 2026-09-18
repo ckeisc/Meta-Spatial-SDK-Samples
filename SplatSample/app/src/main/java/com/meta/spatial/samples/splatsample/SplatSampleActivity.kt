@@ -7,13 +7,21 @@
 
 package com.meta.spatial.samples.splatsample
 
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.util.Log
+import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
+import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
+import androidx.documentfile.provider.DocumentFile
 import com.meta.spatial.compose.ComposeFeature
 import com.meta.spatial.compose.ComposeViewPanelRegistration
 import com.meta.spatial.core.Entity
@@ -28,7 +36,6 @@ import com.meta.spatial.core.Vector3
 import com.meta.spatial.okhttp3.OkHttpAssetFetcher
 import com.meta.spatial.runtime.ButtonBits
 import com.meta.spatial.runtime.NetworkedAssetLoader
-import com.meta.spatial.runtime.SceneMaterial
 import com.meta.spatial.splat.SpatialSDKExperimentalSplatAPI
 import com.meta.spatial.splat.Splat
 import com.meta.spatial.splat.SplatFeature
@@ -37,12 +44,8 @@ import com.meta.spatial.toolkit.AppSystemActivity
 import com.meta.spatial.toolkit.AvatarAttachment
 import com.meta.spatial.toolkit.Controller
 import com.meta.spatial.toolkit.DpPerMeterDisplayOptions
-import com.meta.spatial.toolkit.GLXFInfo
 import com.meta.spatial.toolkit.Grabbable
 import com.meta.spatial.toolkit.GrabbableType
-import com.meta.spatial.toolkit.Material
-import com.meta.spatial.toolkit.Mesh
-import com.meta.spatial.toolkit.MeshCollision
 import com.meta.spatial.toolkit.PanelRegistration
 import com.meta.spatial.toolkit.PanelStyleOptions
 import com.meta.spatial.toolkit.QuadShapeOptions
@@ -54,26 +57,36 @@ import com.meta.spatial.toolkit.Visible
 import com.meta.spatial.toolkit.createPanelEntity
 import com.meta.spatial.vr.VRFeature
 import java.io.File
+import java.io.IOException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** SharedPreferences key for the last splat the user picked in the panel. */
+private const val KEY_SELECTED_SPLAT = "selected_splat_index"
 
 @OptIn(SpatialSDKExperimentalSplatAPI::class)
 class SplatSampleActivity : AppSystemActivity() {
-
-  private var gltfxEntity: Entity? = null
   private val activityScope = CoroutineScope(Dispatchers.Main)
 
-  private lateinit var environmentEntity: Entity
-  private lateinit var skyboxEntity: Entity
   private lateinit var panelEntity: Entity
-  private lateinit var floorEntity: Entity
   // Entity that holds the Splat component for rendering Gaussian Splats
   private lateinit var splatEntity: Entity
 
-  private val splatList: List<String> = listOf("apk://Menlo Park.spz", "apk://Los Angeles.spz")
+  // Built-in demo splats, shown when no Hyperscape captures are available.
+  private val demoSplats: List<String> = listOf("apk://Menlo Park.spz", "apk://Los Angeles.spz")
+  // All known Hyperscape captures: device storage first, then APK assets.
+  // State so the panel picker recomposes when the list refreshes (e.g. after
+  // the Documents permission is granted).
+  private var capturesState = mutableStateOf<List<HyperscapeCapture>>(emptyList())
+
+  /** Effective picker list: capture URIs, or the demo splats when none exist. */
+  private fun effectiveSplatList(): List<String> =
+      capturesState.value.map { it.splatUri }.ifEmpty { demoSplats }
+
+  private lateinit var defaultSplatPath: Uri
   private var selectedIndex = mutableStateOf(0)
   /**
    * Controls whether the control panel UI is interactive.
@@ -87,10 +100,56 @@ class SplatSampleActivity : AppSystemActivity() {
    * - Apply a visual "greyed out" effect to indicate the disabled state
    */
   private var isPanelInteractive = mutableStateOf(true)
-  private val defaultSplatPath = splatList[0].toUri()
+  /**
+   * Whether the control panel is currently shown. The A button toggles it:
+   * pressing A hides the panel completely; pressing A again re-shows it in
+   * front of the user.
+   */
+  private var isPanelVisible = mutableStateOf(true)
   private val delayVisibilityMS = 2000L
+  /**
+   * True while a capture folder picked through the system folder picker is
+   * being copied into the app's HyperscapeCaptures dir. The panel shows an
+   * "Importing…" state and disables the picker meanwhile.
+   */
+  private var isImportingCapture = mutableStateOf(false)
+
+  // Remembers which splat the user picked so the next launch opens on it
+  // instead of always defaulting to the first entry.
+  private val prefs by lazy { getSharedPreferences("splat_sample_prefs", MODE_PRIVATE) }
+
+  // VrActivity extends android.app.Activity (not ComponentActivity), so the
+  // Activity Result API is unavailable; use the framework callbacks below.
+  private companion object {
+    private const val REQ_DOCUMENTS_PERMISSION = 1001
+    private const val REQ_OPEN_CAPTURE_FOLDER = 1002
+  }
+
+  @Deprecated("framework callback required by VrActivity base class")
+  override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    super.onActivityResult(requestCode, resultCode, data)
+    if (requestCode == REQ_OPEN_CAPTURE_FOLDER && resultCode == RESULT_OK) {
+      data?.data?.let { importCaptureFolder(it) }
+    }
+  }
+
+  override fun onRequestPermissionsResult(
+      requestCode: Int,
+      permissions: Array<out String>,
+      grantResults: IntArray
+  ) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode == REQ_DOCUMENTS_PERMISSION) {
+      val granted =
+          grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+      Log.i("SplatSample", "Documents permission granted=$granted")
+      if (granted) refreshCaptures()
+    }
+  }
+
   // Rotation applied to the Splat to align it with the scene coordinate system
-  // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space
+  // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space.
+  // Hyperscape captures are Z-up like the sample's own assets, so the same rotation applies.
   private val eulerRotation = Vector3(-90f, 0f, 0f)
   private val panelHeight = 1.5f
   private val panelOffset = 2.5f
@@ -115,36 +174,174 @@ class SplatSampleActivity : AppSystemActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // Captures come from device storage (sideloaded, no rebuild needed) and
+    // APK assets; device captures win the top spots in the picker.
+    refreshCaptures()
+    val list = effectiveSplatList()
+    // Restore the user's last pick (clamped in case the set changed);
+    // fall back to the first splat on a fresh install.
+    selectedIndex.value = prefs.getInt(KEY_SELECTED_SPLAT, 0).coerceIn(list.indices)
+    defaultSplatPath = list[selectedIndex.value].toUri()
+    // A raw (unbaked) Hyperscape .spz must never be the first paint: its
+    // non-standard SH basis renders with black patches until its on-demand
+    // bake finishes. Prefer an already-baked capture; with nothing baked
+    // yet (e.g. a fresh adb-push of raw bundles), first paint is a demo
+    // splat and no tile is highlighted — tapping a tile bakes it on demand.
+    if (capturesState.value.getOrNull(selectedIndex.value)?.needsBake == true) {
+      val bakedIdx = capturesState.value.indexOfFirst { !it.needsBake }
+      if (bakedIdx >= 0) {
+        selectedIndex.value = bakedIdx
+        defaultSplatPath = effectiveSplatList()[bakedIdx].toUri()
+      } else {
+        selectedIndex.value = -1
+        defaultSplatPath = demoSplats[0].toUri()
+      }
+    }
     NetworkedAssetLoader.init(
         File(applicationContext.getCacheDir().canonicalPath),
         OkHttpAssetFetcher(),
     )
-    skyboxEntity =
-        Entity.create(
-            listOf(
-                Mesh(Uri.parse("mesh://skybox"), hittable = MeshCollision.NoCollision),
-                Material().apply {
-                  baseTextureAndroidResourceId = R.drawable.skydome
-                  unlit = true
-                },
-                Transform(Pose(Vector3(x = 0f, y = 0f, z = 0f))),
-            ),
-        )
     panelEntity =
         Entity.createPanelEntity(
             R.id.control_panel,
             Transform(Pose(Vector3(0f, panelHeight, 0f), Quaternion(0f, 180f, 0f))),
             Grabbable(type = GrabbableType.PIVOT_Y, minHeight = 0.75f, maxHeight = 2.5f),
         )
-    loadGLXF { composition ->
-      environmentEntity = composition.getNodeByName("Environment").entity
-      val environmentMesh = environmentEntity.getComponent<Mesh>()
-      environmentMesh.defaultShaderOverride = SceneMaterial.UNLIT_SHADER
-      environmentEntity.setComponent(environmentMesh)
-      floorEntity = composition.getNodeByName("Floor").entity
-      initializeSplat(defaultSplatPath)
-      setSplatVisibility(false)
+    // No default 3D scene: the sample shows only the splat and the control
+    // panel. (The Composition.glxf Environment/Floor and the skydome skybox
+    // were removed; see HYPERSCAPE.md.)
+    initializeSplat(defaultSplatPath)
+    setSplatVisibility(false)
+    // Ask for Documents access so captures can be sideloaded to
+    // Documents/HyperscapeCaptures without rebuilding the APK. The
+    // app-specific external files dir works without this permission.
+    if (!hasDocumentsAccess() && Build.VERSION.SDK_INT <= 32) {
+      requestPermissions(
+          arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE), REQ_DOCUMENTS_PERMISSION)
     }
+  }
+
+  /**
+   * (Re)scans for Hyperscape captures: device storage first, then APK assets.
+   * Called at startup and again if the Documents permission is granted later.
+   */
+  private fun refreshCaptures() {
+    val assetCaptures = loadHyperscapeCaptures(this)
+    val deviceCaptures = loadDeviceCaptures(deviceCaptureRoots())
+    val merged = deviceCaptures + assetCaptures
+    // Compare more than the URIs: an on-demand bake keeps the same <id>.spz
+    // path but flips needsBake and fills in the splat count / spawn.
+    val key = { c: HyperscapeCapture -> "${c.splatUri}#${c.needsBake}#${c.splatCount}" }
+    if (merged.map(key) != capturesState.value.map(key)) {
+      capturesState.value = merged
+      selectedIndex.value = selectedIndex.value.coerceIn(effectiveSplatList().indices)
+      Log.i(
+          "SplatSample",
+          "Captures: ${deviceCaptures.size} on device, ${assetCaptures.size} in assets")
+    }
+  }
+
+  /**
+   * Copies a picked folder into the app-specific HyperscapeCaptures dir,
+   * then rescans and selects the new capture. Two kinds of folders are
+   * accepted:
+   * - already-baked (capture.json + .spz): used as-is;
+   * - raw Hyperscape bundle (.spz + camera poses + cluster files): baked on
+   *   device first (DC-bake, outlier filter, spawn, manifest), so Meta's
+   *   renderer shows correct colors with no PC step.
+   *
+   * The copy + bake run off the main thread; the panel shows an "Importing…"
+   * state meanwhile. Shows a Toast on success or failure.
+   */
+  private fun importCaptureFolder(treeUri: Uri) {
+    isImportingCapture.value = true
+    activityScope.launch(Dispatchers.IO) {
+      var importedDir: String? = null
+      try {
+        contentResolver.takePersistableUriPermission(
+            treeUri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val tree =
+            DocumentFile.fromTreeUri(this@SplatSampleActivity, treeUri)
+                ?: throw IllegalArgumentException("cannot open picked folder")
+        val filesRoot =
+            getExternalFilesDir(null) ?: throw IllegalStateException("no external files dir")
+        val rawName = tree.name ?: "capture"
+        val dirName = rawName.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val dest = File(filesRoot, "HyperscapeCaptures/$dirName").apply { mkdirs() }
+        var copied = 0
+        for (f in tree.listFiles()) {
+          if (!f.isFile) continue
+          val name = f.name ?: continue
+          contentResolver.openInputStream(f.uri)?.use { input ->
+            File(dest, name).outputStream().use { input.copyTo(it) }
+          } ?: throw IOException("cannot read $name")
+          copied++
+        }
+        if (copied == 0) throw IllegalArgumentException("picked folder is empty")
+        if (File(dest, "capture.json").isFile) {
+          Log.i("SplatSample", "Imported baked capture folder '$dirName'")
+        } else {
+          // Raw Hyperscape bundle(s): bake every <id>.spz in the folder on
+          // device (Hyperscape splat enumeration), so each becomes its own
+          // picker tile with correct DC-only colors under Meta's renderer.
+          Log.i("SplatSample", "No capture.json in '$dirName'; baking on device…")
+          val results = bakeHyperscapeBundle(dest, name = rawName)
+          Log.i(
+              "SplatSample",
+              "Baked ${results.size} splat(s): ${results.joinToString { "'${it.id}' (${it.splatCount})" }}")
+        }
+        importedDir = dirName
+      } catch (e: Exception) {
+        Log.w("SplatSample", "Capture import failed", e)
+      }
+      withContext(Dispatchers.Main) {
+        isImportingCapture.value = false
+        val dirName = importedDir
+        if (dirName != null) {
+          refreshCaptures()
+          val idx = capturesState.value.indexOfFirst { it.deviceDir?.name == dirName }
+          if (idx >= 0) {
+            loadSplat(effectiveSplatList()[idx])
+            Toast.makeText(
+                    this@SplatSampleActivity,
+                    "Imported '${capturesState.value[idx].name}'",
+                    Toast.LENGTH_SHORT)
+                .show()
+          }
+        } else {
+          Toast.makeText(
+                  this@SplatSampleActivity,
+                  "Import failed — pick a baked capture folder or a raw Hyperscape bundle (.spz)",
+                  Toast.LENGTH_LONG)
+              .show()
+        }
+      }
+    }
+  }
+
+  /**
+   * Roots scanned for sideloaded captures (each gets a "HyperscapeCaptures"
+   * subfolder; see loadDeviceCaptures).
+   * - App-specific external files dir: no permission needed, adb-pushable.
+   * - Documents/: the shared folder the user asked for; needs
+   *   READ_EXTERNAL_STORAGE on API <= 32, requested at startup.
+   */
+  private fun deviceCaptureRoots(): List<File> {
+    val roots = mutableListOf<File>()
+    getExternalFilesDir(null)?.let { roots.add(it) }
+    if (hasDocumentsAccess()) {
+      @Suppress("DEPRECATION")
+      val docs = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+      roots.add(docs)
+    }
+    return roots
+  }
+
+  /** True when the app may read Documents/HyperscapeCaptures. */
+  private fun hasDocumentsAccess(): Boolean {
+    if (Build.VERSION.SDK_INT > 32) return false // scoped storage: app dir only
+    return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+        PackageManager.PERMISSION_GRANTED
   }
 
   @OptIn(SpatialSDKInternalTestingAPI::class)
@@ -236,6 +433,22 @@ class SplatSampleActivity : AppSystemActivity() {
    * @param newSplatPath Path to the .spz Splat file (e.g., "apk://MySplat.spz" or a URL)
    */
   fun loadSplat(newSplatPath: String) {
+    // An enumerated-but-unbaked <id>.spz (raw Hyperscape bundle) can't be
+    // shown directly — its non-standard SH basis renders with black patches
+    // under Meta's renderer. Bake it on device first, then load.
+    val capture = capturesState.value.firstOrNull { it.splatUri == newSplatPath }
+    if (capture != null && capture.needsBake && capture.deviceDir != null) {
+      bakeAndLoad(capture)
+      return
+    }
+
+    // Remember the pick so the next launch restores it (single source of
+    // truth for selectedIndex; the panel also sets it on tap).
+    val newIndex = effectiveSplatList().indexOf(newSplatPath)
+    if (newIndex >= 0) {
+      selectedIndex.value = newIndex
+      prefs.edit().putInt(KEY_SELECTED_SPLAT, newIndex).apply()
+    }
 
     if (splatEntity.hasComponent<Splat>()) {
       // Entity exists with a Splat component
@@ -262,6 +475,47 @@ class SplatSampleActivity : AppSystemActivity() {
   }
 
   /**
+   * On-demand bake for an enumerated-but-unbaked `<id>.spz` — e.g. a raw
+   * Hyperscape bundle adb-pushed straight into HyperscapeCaptures/ instead of
+   * picked through the folder importer. Bakes in the background (the panel
+   * shows the "Importing…" state meanwhile), then rescans and loads the tile.
+   * A second tap while the bake runs is ignored.
+   */
+  private fun bakeAndLoad(capture: HyperscapeCapture) {
+    val dir = capture.deviceDir ?: return
+    if (isImportingCapture.value) return
+    isImportingCapture.value = true
+    setPanelInteractive(false)
+    activityScope.launch(Dispatchers.IO) {
+      val ok =
+          try {
+            val result = bakeSingleSpz(dir, capture.splatFile)
+            Log.i("SplatSample", "Baked on demand '${result.id}': ${result.splatCount} splats")
+            true
+          } catch (e: Exception) {
+            Log.w("SplatSample", "On-demand bake failed for '${capture.id}'", e)
+            false
+          }
+      withContext(Dispatchers.Main) {
+        isImportingCapture.value = false
+        if (ok) {
+          refreshCaptures()
+          // The tile now resolves to the baked manifest entry (same URI —
+          // the bake overwrites <id>.spz in place).
+          loadSplat(capture.splatUri)
+        } else {
+          setPanelInteractive(true)
+          Toast.makeText(
+                  this@SplatSampleActivity,
+                  "Bake failed for '${capture.id}' — see logcat",
+                  Toast.LENGTH_LONG)
+              .show()
+        }
+      }
+    }
+  }
+
+  /**
    * Controls the visibility of the Splat in the scene.
    *
    * Splats respect the Visible component like other rendered entities. Setting Visible(false) hides
@@ -273,16 +527,30 @@ class SplatSampleActivity : AppSystemActivity() {
 
     // Update the Visible Component on the Entity with a Splat Component
     splatEntity.setComponent(Visible(isSplatVisible))
-    // Show environment when the Splat is hidden, hide when the Splat is visible
-    setEnvironmentVisiblity(!isSplatVisible)
-  }
-
-  fun setEnvironmentVisiblity(isVisible: Boolean) {
-    environmentEntity.setComponent(Visible(isVisible))
-    skyboxEntity.setComponent(Visible(isVisible))
   }
 
   fun recenterScene() {
+    val captureSpawn = currentCapture()?.spawn
+    if (captureSpawn != null) {
+      // Hyperscape capture: drop the user at the capture camera's start pose,
+      // facing the way it faced. setViewOrigin takes the *tracking-space*
+      // origin (floor level, like the sample's y=0) — not the eye height —
+      // so the headset's own eye height lands where the capture camera was.
+      // The panel goes 1.5 m ahead of the spawn point along the capture
+      // forward vector, turned to face the user.
+      scene.setViewOrigin(captureSpawn.x, 0f, captureSpawn.z, captureSpawn.yawDeg)
+      val fwd = captureSpawn.forward
+      val px = if (fwd != null) captureSpawn.x + fwd.x * 1.5f else captureSpawn.x
+      val pz = if (fwd != null) captureSpawn.z + fwd.z * 1.5f else captureSpawn.z
+      panelEntity.setComponent(
+          Transform(
+              Pose(
+                  Vector3(px, panelHeight, pz),
+                  Quaternion(0f, captureSpawn.yawDeg + 180f, 0f),
+              )),
+      )
+      return
+    }
     var z = laxZ
     if (splatEntity.getComponent<Splat>().path.toString() == defaultSplatPath.toString()) {
       z = mpkZ
@@ -291,6 +559,16 @@ class SplatSampleActivity : AppSystemActivity() {
     panelEntity.setComponent(
         Transform(Pose(Vector3(0f, panelHeight, z - panelOffset), Quaternion(0f, 180f, 0f))),
     )
+  }
+
+  /**
+   * Returns the Hyperscape capture backing the currently loaded splat, or null
+   * for the built-in demo splats.
+   */
+  private fun currentCapture(): HyperscapeCapture? {
+    if (!::splatEntity.isInitialized || capturesState.value.isEmpty()) return null
+    val path = splatEntity.getComponent<Splat>().path.toString()
+    return capturesState.value.firstOrNull { it.splatUri == path }
   }
 
   /**
@@ -335,7 +613,8 @@ class SplatSampleActivity : AppSystemActivity() {
    * - Access head tracking data to reposition UI panels
    *
    * Button mappings:
-   * - A Button: Repositions the UI panel 2 meters in front of the user's current view direction
+   * - A Button: Toggles the UI panel — hides it completely, or re-shows it
+   *   2 meters in front of the user's current view direction
    * - B Button: Resets the view origin and positions the panel in front of the user
    *
    * This is a useful starting point for implementing controller-based interactions in your Spatial
@@ -360,7 +639,16 @@ class SplatSampleActivity : AppSystemActivity() {
             (controller.changedButtons and ButtonBits.ButtonA) != 0 &&
                 (controller.buttonState and ButtonBits.ButtonA) != 0
         ) {
-          positionPanelInFrontOfUser(panelOffset)
+          // A toggles the panel: hide it completely, or show it again 2 m
+          // in front of the user.
+          if (isPanelVisible.value) {
+            panelEntity.setComponent(Visible(false))
+            isPanelVisible.value = false
+          } else {
+            positionPanelInFrontOfUser(panelOffset)
+            panelEntity.setComponent(Visible(true))
+            isPanelVisible.value = true
+          }
         }
 
         // Check if Button B was just pressed
@@ -387,21 +675,22 @@ class SplatSampleActivity : AppSystemActivity() {
           // Pass isPanelInteractive state to control UI interaction during Splat loading
           // When false, the panel images become non-clickable and visually greyed out
           // This prevents users from selecting a new Splat while one is still loading
-          ControlPanel(splatList, selectedIndex, isPanelInteractive, ::loadSplat)
+          // Reading capturesState here makes the picker recompose when the
+          // capture list refreshes (e.g. after the Documents permission grant).
+          ControlPanel(
+              effectiveSplatList(),
+              capturesState.value,
+              selectedIndex,
+              isPanelInteractive,
+              isImportingCapture,
+              ::loadSplat,
+              onOpenFolder = {
+                @Suppress("DEPRECATION")
+                startActivityForResult(
+                    Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), REQ_OPEN_CAPTURE_FOLDER)
+              })
         },
     )
-  }
-
-  private fun loadGLXF(onLoaded: ((GLXFInfo) -> Unit) = {}): Job {
-    gltfxEntity = Entity.create()
-    return activityScope.launch {
-      glXFManager.inflateGLXF(
-          Uri.parse("apk:///scenes/Composition.glxf"),
-          rootEntity = gltfxEntity!!,
-          keyName = "example_key_name",
-          onLoaded = onLoaded,
-      )
-    }
   }
 
   private fun createSimpleComposePanel(

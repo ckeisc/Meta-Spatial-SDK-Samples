@@ -57,6 +57,10 @@ android {
 //noinspection UseTomlInstead
 dependencies {
   implementation(libs.androidx.core.ktx)
+  implementation(libs.androidx.documentfile)
+  // Video thumbnails: <id>_flyby0.mp4 hover-to-play tiles (ExoPlayer + PlayerView)
+  implementation(libs.media3.exoplayer)
+  implementation(libs.media3.ui)
   testImplementation(libs.junit)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.espresso.core)
@@ -91,9 +95,6 @@ dependencies {
   implementation(libs.androidx.material.icons.extended)
 }
 
-val projectDir = layout.projectDirectory
-val sceneDirectory = projectDir.dir("scenes")
-
 spatial {
   allowUsageDataCollection.set(true)
   scenes {
@@ -101,12 +102,6 @@ spatial {
 
     // cliPath.set("/Applications/Meta Spatial Editor.app/Contents/MacOS/CLI")
 
-    exportItems {
-      item {
-        projectPath.set(sceneDirectory.file("Main.metaspatial"))
-        outputPath.set(projectDir.dir("src/main/assets/scenes"))
-      }
-    }
     hotReload {
       appPackage.set("com.meta.spatial.samples.splatsample")
       appMainActivity.set(".SplatSampleActivity")

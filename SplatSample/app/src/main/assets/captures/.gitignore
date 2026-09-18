@@ -1,0 +1,15 @@
+# Baked Hyperscape captures live here (not in git)
+#
+# This directory is intentionally empty in the repository. Personal scan data
+# is never committed — bake your own captures locally with:
+#
+#   python3 SplatSample/tools/hyperscape_to_quest.py <capture_id> \
+#       --bundle-dir <your-hyperscape-bundle> \
+#       --out-dir SplatSample/app/src/main/assets/captures \
+#       --name "My Capture"
+#
+# See SplatSample/HYPERSCAPE.md for the full workflow. Without any captures
+# the app falls back to its built-in Menlo Park / Los Angeles demo splats.
+*
+!.gitignore
+!README.md
