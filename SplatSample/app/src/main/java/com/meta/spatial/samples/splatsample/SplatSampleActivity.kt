@@ -110,6 +110,12 @@ class SplatSampleActivity : AppSystemActivity() {
    * - Apply a visual "greyed out" effect to indicate the disabled state
    */
   private var isPanelInteractive = mutableStateOf(true)
+  /**
+   * Whether the control panel is currently shown. The A button toggles it:
+   * pressing A hides the panel completely; pressing A again re-shows it in
+   * front of the user.
+   */
+  private var isPanelVisible = mutableStateOf(true)
   private val delayVisibilityMS = 2000L
   /**
    * True while a capture folder picked through the system folder picker is
@@ -186,6 +192,21 @@ class SplatSampleActivity : AppSystemActivity() {
     // fall back to the first splat on a fresh install.
     selectedIndex.value = prefs.getInt(KEY_SELECTED_SPLAT, 0).coerceIn(list.indices)
     defaultSplatPath = list[selectedIndex.value].toUri()
+    // A raw (unbaked) Hyperscape .spz must never be the first paint: its
+    // non-standard SH basis renders with black patches until its on-demand
+    // bake finishes. Prefer an already-baked capture; with nothing baked
+    // yet (e.g. a fresh adb-push of raw bundles), first paint is a demo
+    // splat and no tile is highlighted — tapping a tile bakes it on demand.
+    if (capturesState.value.getOrNull(selectedIndex.value)?.needsBake == true) {
+      val bakedIdx = capturesState.value.indexOfFirst { !it.needsBake }
+      if (bakedIdx >= 0) {
+        selectedIndex.value = bakedIdx
+        defaultSplatPath = effectiveSplatList()[bakedIdx].toUri()
+      } else {
+        selectedIndex.value = -1
+        defaultSplatPath = demoSplats[0].toUri()
+      }
+    }
     NetworkedAssetLoader.init(
         File(applicationContext.getCacheDir().canonicalPath),
         OkHttpAssetFetcher(),
@@ -233,7 +254,10 @@ class SplatSampleActivity : AppSystemActivity() {
     val assetCaptures = loadHyperscapeCaptures(this)
     val deviceCaptures = loadDeviceCaptures(deviceCaptureRoots())
     val merged = deviceCaptures + assetCaptures
-    if (merged.map { it.splatUri } != capturesState.value.map { it.splatUri }) {
+    // Compare more than the URIs: an on-demand bake keeps the same <id>.spz
+    // path but flips needsBake and fills in the splat count / spawn.
+    val key = { c: HyperscapeCapture -> "${c.splatUri}#${c.needsBake}#${c.splatCount}" }
+    if (merged.map(key) != capturesState.value.map(key)) {
       capturesState.value = merged
       selectedIndex.value = selectedIndex.value.coerceIn(effectiveSplatList().indices)
       Log.i(
@@ -282,9 +306,14 @@ class SplatSampleActivity : AppSystemActivity() {
         if (File(dest, "capture.json").isFile) {
           Log.i("SplatSample", "Imported baked capture folder '$dirName'")
         } else {
+          // Raw Hyperscape bundle(s): bake every <id>.spz in the folder on
+          // device (Hyperscape splat enumeration), so each becomes its own
+          // picker tile with correct DC-only colors under Meta's renderer.
           Log.i("SplatSample", "No capture.json in '$dirName'; baking on device…")
-          val result = bakeHyperscapeBundle(dest, name = rawName)
-          Log.i("SplatSample", "Baked '${result.id}': ${result.splatCount} splats")
+          val results = bakeHyperscapeBundle(dest, name = rawName)
+          Log.i(
+              "SplatSample",
+              "Baked ${results.size} splat(s): ${results.joinToString { "'${it.id}' (${it.splatCount})" }}")
         }
         importedDir = dirName
       } catch (e: Exception) {
@@ -429,6 +458,15 @@ class SplatSampleActivity : AppSystemActivity() {
    * @param newSplatPath Path to the .spz Splat file (e.g., "apk://MySplat.spz" or a URL)
    */
   fun loadSplat(newSplatPath: String) {
+    // An enumerated-but-unbaked <id>.spz (raw Hyperscape bundle) can't be
+    // shown directly — its non-standard SH basis renders with black patches
+    // under Meta's renderer. Bake it on device first, then load.
+    val capture = capturesState.value.firstOrNull { it.splatUri == newSplatPath }
+    if (capture != null && capture.needsBake && capture.deviceDir != null) {
+      bakeAndLoad(capture)
+      return
+    }
+
     // Remember the pick so the next launch restores it (single source of
     // truth for selectedIndex; the panel also sets it on tap).
     val newIndex = effectiveSplatList().indexOf(newSplatPath)
@@ -458,6 +496,47 @@ class SplatSampleActivity : AppSystemActivity() {
     } else {
       // No Splat Component exists yet, create one
       splatEntity.setComponent(Splat(newSplatPath.toUri()))
+    }
+  }
+
+  /**
+   * On-demand bake for an enumerated-but-unbaked `<id>.spz` — e.g. a raw
+   * Hyperscape bundle adb-pushed straight into HyperscapeCaptures/ instead of
+   * picked through the folder importer. Bakes in the background (the panel
+   * shows the "Importing…" state meanwhile), then rescans and loads the tile.
+   * A second tap while the bake runs is ignored.
+   */
+  private fun bakeAndLoad(capture: HyperscapeCapture) {
+    val dir = capture.deviceDir ?: return
+    if (isImportingCapture.value) return
+    isImportingCapture.value = true
+    setPanelInteractive(false)
+    activityScope.launch(Dispatchers.IO) {
+      val ok =
+          try {
+            val result = bakeSingleSpz(dir, capture.splatFile)
+            Log.i("SplatSample", "Baked on demand '${result.id}': ${result.splatCount} splats")
+            true
+          } catch (e: Exception) {
+            Log.w("SplatSample", "On-demand bake failed for '${capture.id}'", e)
+            false
+          }
+      withContext(Dispatchers.Main) {
+        isImportingCapture.value = false
+        if (ok) {
+          refreshCaptures()
+          // The tile now resolves to the baked manifest entry (same URI —
+          // the bake overwrites <id>.spz in place).
+          loadSplat(capture.splatUri)
+        } else {
+          setPanelInteractive(true)
+          Toast.makeText(
+                  this@SplatSampleActivity,
+                  "Bake failed for '${capture.id}' — see logcat",
+                  Toast.LENGTH_LONG)
+              .show()
+        }
+      }
     }
   }
 
@@ -566,7 +645,8 @@ class SplatSampleActivity : AppSystemActivity() {
    * - Access head tracking data to reposition UI panels
    *
    * Button mappings:
-   * - A Button: Repositions the UI panel 2 meters in front of the user's current view direction
+   * - A Button: Toggles the UI panel — hides it completely, or re-shows it
+   *   2 meters in front of the user's current view direction
    * - B Button: Resets the view origin and positions the panel in front of the user
    *
    * This is a useful starting point for implementing controller-based interactions in your Spatial
@@ -591,7 +671,16 @@ class SplatSampleActivity : AppSystemActivity() {
             (controller.changedButtons and ButtonBits.ButtonA) != 0 &&
                 (controller.buttonState and ButtonBits.ButtonA) != 0
         ) {
-          positionPanelInFrontOfUser(panelOffset)
+          // A toggles the panel: hide it completely, or show it again 2 m
+          // in front of the user.
+          if (isPanelVisible.value) {
+            panelEntity.setComponent(Visible(false))
+            isPanelVisible.value = false
+          } else {
+            positionPanelInFrontOfUser(panelOffset)
+            panelEntity.setComponent(Visible(true))
+            isPanelVisible.value = true
+          }
         }
 
         // Check if Button B was just pressed

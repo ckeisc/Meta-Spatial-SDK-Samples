@@ -58,6 +58,9 @@ android {
 dependencies {
   implementation(libs.androidx.core.ktx)
   implementation(libs.androidx.documentfile)
+  // Video thumbnails: <id>_flyby0.mp4 hover-to-play tiles (ExoPlayer + PlayerView)
+  implementation(libs.media3.exoplayer)
+  implementation(libs.media3.ui)
   testImplementation(libs.junit)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.espresso.core)

@@ -29,7 +29,7 @@ Bundle layout (as downloaded by splat_fetch.py):
   <capture_id>.spz
   <capture_id>_cluster_centroids.json
   <capture_id>_cluster_masks.bin
-  <capture_id>_camera_poses.bin        (JSON text despite .bin)
+  <capture_id>_camera_poses          (JSON text, no extension)
   <capture_id>_scene_mesh.<ext>       (optional)
   <capture_id>_flyby.mp4              (optional, for thumbnail)
   <capture_id>_spawn_points_2d.json   (optional)
@@ -302,7 +302,10 @@ def main():
     spz_out = os.path.join(out, f'{cid}.spz')
     open(spz_out, 'wb').write(baked)
 
-    poses_path = os.path.join(bdir, f'{cid}_camera_poses.bin')
+    poses_path = os.path.join(bdir, f'{cid}_camera_poses')
+    # Back-compat: older downloads saved it with a .bin suffix.
+    if not os.path.exists(poses_path):
+        poses_path += '.bin'
     spawn = spawn_from_camera_poses(poses_path) if os.path.exists(poses_path) else None
 
     thumb = os.path.join(out, 'thumb.jpg')

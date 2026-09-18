@@ -25,10 +25,14 @@
 package com.meta.spatial.samples.splatsample
 
 import android.graphics.BitmapFactory
+import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.hoverable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.Arrangement
@@ -44,8 +48,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -62,6 +69,13 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.PlayerView
+import java.io.File
 import com.meta.spatial.uiset.theme.LocalColorScheme
 import com.meta.spatial.uiset.theme.SpatialColorScheme
 import com.meta.spatial.uiset.theme.SpatialTheme
@@ -87,7 +101,7 @@ private val panelHeadingText = "Splat Sample"
 private val panelInstructionText = buildAnnotatedString {
   append("Press ")
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("A") }
-  append(" to snap the panel in front of you. \nPress ")
+  append(" to show/hide the panel in front of you. \nPress ")
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("B") }
   append(" to recenter the view. \nTap ")
   withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) { append("Open capture folder…") }
@@ -156,7 +170,8 @@ fun ControlPanel(
             ) {
               // Large clickable preview image
               val previewResource = getSplatPreviewResource(option)
-              val thumbnailBitmap = captureThumbnail(capture)
+              // Hyperscape flyby video sidecar: hover-to-play video tile.
+              val videoFile = capture?.videoThumbnailFile
               // Visual feedback for loading state:
               // When panel is not interactive (Splat is loading), reduce opacity to 40%
               // This provides a clear visual cue that the panel is temporarily disabled
@@ -181,39 +196,50 @@ fun ControlPanel(
                         loadSplatFunction(option)
                         selectedIndex.value = index
                       }
-              // Prefer the capture thumbnail from assets; fall back to the
-              // built-in drawable previews used by the demo splats.
-              if (thumbnailBitmap != null) {
-                Image(
-                    bitmap = thumbnailBitmap,
-                    contentDescription = "Preview of $option",
+              // Prefer the flyby video tile; then the capture thumbnail from
+              // assets; then the built-in drawable previews used by the demo
+              // splats.
+              if (videoFile != null) {
+                VideoThumbnailTile(
+                    videoFile = videoFile,
+                    contentDescription = "Flyby preview of $option",
                     modifier = imageModifier,
-                    contentScale = ContentScale.Crop,
-                )
-              } else if (previewResource != null) {
-                Image(
-                    painter = painterResource(id = previewResource),
-                    contentDescription = "Preview of $option",
-                    modifier = imageModifier,
-                    contentScale = ContentScale.Crop,
                 )
               } else {
-                // No preview image available (typical for baked captures without
-                // a flyby thumbnail): tappable placeholder tile so the capture
-                // stays selectable. imageModifier already carries the click handler.
-                Box(
-                    modifier =
-                        imageModifier.background(
-                            LocalColorScheme.current.primaryAlphaBackground.copy(alpha = 0.12f),
-                            RoundedCornerShape(12.dp),
-                        ),
-                    contentAlignment = Alignment.Center,
-                ) {
-                  Text(
-                      text = "No preview",
-                      style = SpatialTheme.typography.body1,
-                      color = LocalColorScheme.current.primaryAlphaBackground.copy(alpha = 0.7f),
+                // Static thumbnail (or placeholder) for non-video tiles.
+                val thumbnailBitmap = captureThumbnail(capture)
+                if (thumbnailBitmap != null) {
+                  Image(
+                      bitmap = thumbnailBitmap,
+                      contentDescription = "Preview of $option",
+                      modifier = imageModifier,
+                      contentScale = ContentScale.Crop,
                   )
+                } else if (previewResource != null) {
+                  Image(
+                      painter = painterResource(id = previewResource),
+                      contentDescription = "Preview of $option",
+                      modifier = imageModifier,
+                      contentScale = ContentScale.Crop,
+                  )
+                } else {
+                  // No preview image available (typical for baked captures without
+                  // a flyby thumbnail): tappable placeholder tile so the capture
+                  // stays selectable. imageModifier already carries the click handler.
+                  Box(
+                      modifier =
+                          imageModifier.background(
+                              LocalColorScheme.current.primaryAlphaBackground.copy(alpha = 0.12f),
+                              RoundedCornerShape(12.dp),
+                          ),
+                      contentAlignment = Alignment.Center,
+                  ) {
+                    Text(
+                        text = "No preview",
+                        style = SpatialTheme.typography.body1,
+                        color = LocalColorScheme.current.primaryAlphaBackground.copy(alpha = 0.7f),
+                    )
+                  }
                 }
               }
 
@@ -248,6 +274,52 @@ fun ControlPanel(
 } // End ControlPanel composable
 
 /**
+ * Hover-to-play video thumbnail for a Hyperscape `<id>_flyby0.mp4` sidecar.
+ *
+ * The tile shows the video's first frame while idle; it auto-plays (muted,
+ * looping) only while the cursor hovers the tile, and pauses when the cursor
+ * leaves. The ExoPlayer is released when the tile leaves the composition.
+ */
+@Composable
+fun VideoThumbnailTile(
+    videoFile: File,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+  val context = LocalContext.current
+  val exoPlayer = remember(videoFile.absolutePath) {
+    ExoPlayer.Builder(context).build().apply {
+      setMediaItem(MediaItem.fromUri(Uri.fromFile(videoFile)))
+      repeatMode = Player.REPEAT_MODE_ALL
+      volume = 0f
+      playWhenReady = false
+      prepare()
+    }
+  }
+  DisposableEffect(videoFile.absolutePath) { onDispose { exoPlayer.release() } }
+
+  val interactionSource = remember { MutableInteractionSource() }
+  val isHovered by interactionSource.collectIsHoveredAsState()
+  // Auto-play only while hovered; pause (freezing on the current frame)
+  // as soon as the cursor leaves the tile.
+  LaunchedEffect(isHovered) {
+    if (isHovered) exoPlayer.play() else exoPlayer.pause()
+  }
+
+  AndroidView(
+      factory = { ctx ->
+        PlayerView(ctx).apply {
+          setPlayer(exoPlayer)
+          useController = false
+          // Crop to fill the tile like the image previews (ContentScale.Crop).
+          resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        }
+      },
+      modifier = modifier.hoverable(interactionSource = interactionSource),
+  )
+}
+
+/**
  * Determines the appropriate color scheme based on system theme.
  *
  * THEMING IN SPATIAL UIS: Spatial apps should respect the user's system theme preference. This
@@ -277,6 +349,8 @@ fun getSplatPreviewResource(splatPath: String): Int? {
  */
 fun getSplatDisplayName(splatPath: String, capture: HyperscapeCapture? = null): String {
   if (capture != null) {
+    // An enumerated-but-unbaked raw bundle: tapping the tile bakes it first.
+    if (capture.needsBake) return "${capture.name} (tap to bake)"
     val count = capture.splatCount
     return if (count > 0) "${capture.name} (${count / 1000}k)" else capture.name
   }

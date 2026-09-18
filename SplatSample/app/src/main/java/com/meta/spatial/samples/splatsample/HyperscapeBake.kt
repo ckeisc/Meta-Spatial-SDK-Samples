@@ -40,28 +40,34 @@ data class BakeOptions(
     val outlierMargin: Double = 8.0,
 )
 
-/** What bakeHyperscapeBundle produced. */
+/** What bakeHyperscapeBundle produced, per .spz. */
 data class BakeResult(
     val id: String,
     val name: String,
     val splatCount: Int,
     val spawn: CaptureSpawn?,
+    val shDegree: Int,
 )
 
 /**
  * Bakes a raw Hyperscape capture bundle into Quest-3-ready assets, on device.
  *
  * This is a port of SplatSample/tools/hyperscape_to_quest.py. The bundle dir
- * is expected to hold `<id>.spz` plus the optional `<id>_camera_poses.bin`
- * (JSON text), `<id>_cluster_centroids.json`, `<id>_cluster_masks.bin` and
- * `<id>_flyby.mp4` files, as downloaded by splat_fetch.py.
+ * is expected to hold one or more `<id>.spz` files plus each capture's
+ * optional `<id>_camera_poses` (JSON text, no extension),
+ * `<id>_cluster_centroids.json`, `<id>_cluster_masks.bin` and
+ * `<id>_flyby0.mp4` sidecars, as downloaded by splat_fetch.py. (Older
+ * downloads named the flyby `<id>_flyby.mp4` and the poses
+ * `<id>_camera_poses.bin`; both are accepted.)
  *
- * Steps: parse SPZ v2 -> optional visibility filter -> outlier (floater)
- * filter -> optional decimation -> DC-bake (neutralize the non-standard SH
- * coefficients to packed 128 = 0.0 so Meta's closed renderer shows correct
- * DC-only colors) -> gzip. Writes the baked `<id>.spz` over the raw file,
- * plus `capture.json` and `thumb.jpg` (via MediaMetadataRetriever, no
- * ffmpeg on device).
+ * Every .spz in the folder is baked (Hyperscape splat enumeration): each
+ * becomes its own selectable capture tile. Steps per .spz: parse SPZ v2 ->
+ * optional visibility filter -> outlier (floater) filter -> optional
+ * decimation -> DC-bake (neutralize the non-standard SH coefficients to
+ * packed 128 = 0.0 so Meta's closed renderer shows correct DC-only colors)
+ * -> gzip. Writes the baked `<id>.spz` over the raw file, `<id>_thumb.jpg`
+ * (via MediaMetadataRetriever, no ffmpeg on device), and a single
+ * `capture.json` holding a "captures" list with one entry per .spz.
  *
  * @throws IllegalArgumentException when the bundle is unusable (no .spz,
  *   bad magic, wrong SPZ version, truncated data).
@@ -70,14 +76,128 @@ fun bakeHyperscapeBundle(
     bundleDir: File,
     name: String? = null,
     opts: BakeOptions = BakeOptions(),
-): BakeResult {
+): List<BakeResult> {
   val spzFiles =
       bundleDir
           .listFiles { f -> f.isFile && f.name.endsWith(".spz", ignoreCase = true) }
           ?.sortedBy { it.name }
           .orEmpty()
   require(spzFiles.isNotEmpty()) { "no .spz in ${bundleDir.name}" }
-  val spzFile = spzFiles[0]
+  // A lone .spz keeps the friendlier folder name; with several, each tile is
+  // labeled by its own <file id>.
+  val results =
+      spzFiles.map { spzFile ->
+        val id = spzFile.nameWithoutExtension
+        bakeOneSpz(bundleDir, spzFile, if (spzFiles.size == 1) (name ?: id) else id, opts)
+      }
+  val entries = JSONArray()
+  results.forEach { r -> entries.put(manifestEntry(r, File(bundleDir, "${r.id}_thumb.jpg").isFile)) }
+  File(bundleDir, "capture.json").writeText(JSONObject().put("captures", entries).toString(2))
+  Log.i(TAG, "wrote ${bundleDir.name}/capture.json with ${results.size} capture(s)")
+  return results
+}
+
+/**
+ * Bakes a single `<id>.spz` inside an already-imported folder and merges its
+ * entry into `capture.json`'s "captures" list (preserving the other entries).
+ * This is the lazy path for .spz files the folder scan enumerated but no
+ * import baked yet — e.g. a raw Hyperscape bundle adb-pushed straight into
+ * HyperscapeCaptures/. Re-baking an already-baked .spz is harmless (the
+ * DC-bake just re-neutralizes the SH chunk), so no baked-marker is needed.
+ */
+fun bakeSingleSpz(
+    bundleDir: File,
+    spzFileName: String,
+    opts: BakeOptions = BakeOptions(),
+): BakeResult {
+  val spzFile = File(bundleDir, spzFileName)
+  require(spzFile.isFile) { "no such .spz in ${bundleDir.name}: $spzFileName" }
+  val result = bakeOneSpz(bundleDir, spzFile, spzFile.nameWithoutExtension, opts)
+
+  val entries = JSONArray()
+  var replaced = false
+  val manifestFile = File(bundleDir, "capture.json")
+  try {
+    if (manifestFile.isFile) {
+      val root = JSONObject(manifestFile.readText())
+      val existing = root.optJSONArray("captures")
+      if (existing != null) {
+        for (i in 0 until existing.length()) {
+          val e = existing.getJSONObject(i)
+          if (e.optString("id") == result.id) {
+            entries.put(manifestEntry(result, File(bundleDir, "${result.id}_thumb.jpg").isFile))
+            replaced = true
+          } else {
+            entries.put(e)
+          }
+        }
+      } else if (root.optString("splat_file").isNotEmpty()) {
+        // Legacy single-capture manifest: keep its entry, append the new one.
+        entries.put(root)
+      }
+    }
+  } catch (e: Exception) {
+    Log.w(TAG, "could not read existing manifest, rewriting", e)
+  }
+  if (!replaced) {
+    entries.put(manifestEntry(result, File(bundleDir, "${result.id}_thumb.jpg").isFile))
+  }
+  manifestFile.writeText(JSONObject().put("captures", entries).toString(2))
+  Log.i(TAG, "baked on demand '${result.id}' (${result.splatCount} splats)")
+  return result
+}
+
+/**
+ * Locates a capture's flyby video. splat_fetch.py names it
+ * `<id>_flyby0.mp4`; older downloads used `<id>_flyby.mp4`.
+ */
+private fun findFlyby(bundleDir: File, id: String): File? =
+    listOf("${id}_flyby0.mp4", "${id}_flyby.mp4")
+        .map { File(bundleDir, it) }
+        .firstOrNull { it.isFile }
+
+/** One "captures" entry for capture.json, from a BakeResult. */
+private fun manifestEntry(r: BakeResult, hasThumb: Boolean): JSONObject {
+  val manifest =
+      JSONObject()
+          .put("id", r.id)
+          .put("name", r.name)
+          .put("splat_file", "${r.id}.spz")
+          .put("splat_count", r.splatCount)
+          .put("dc_baked", true)
+          .put("sh_mode", "neutral-128")
+          .put("has_thumbnail", hasThumb)
+          .put(
+              "source",
+              JSONObject()
+                  .put("sh_degree", r.shDegree)
+                  .put(
+                      "note",
+                      "Hyperscape SPZ: non-standard SH basis; baked to DC-only on device"))
+  if (r.spawn != null) {
+    manifest.put(
+        "spawn",
+        JSONObject()
+            .put("position", JSONArray(listOf(r.spawn.x, r.spawn.y, r.spawn.z)))
+            .put("yaw_deg", r.spawn.yawDeg)
+            .put(
+                "forward",
+                r.spawn.forward?.let { f -> JSONArray(listOf(f.x, f.y, f.z)) }
+                    ?: JSONObject.NULL))
+  }
+  return manifest
+}
+
+/**
+ * Bakes one raw `<id>.spz`: filters -> DC-bake (overwrites the file in
+ * place) -> `<id>_thumb.jpg` from the flyby video when present.
+ */
+private fun bakeOneSpz(
+    bundleDir: File,
+    spzFile: File,
+    displayName: String,
+    opts: BakeOptions,
+): BakeResult {
   val id = spzFile.nameWithoutExtension
 
   var data = spzFile.readBytes()
@@ -119,43 +239,19 @@ fun bakeHyperscapeBundle(
   spzFile.writeBytes(dcBake(data, hdr, n))
   Log.i(TAG, "DC-bake done for $id ($n splats)")
 
-  val posesFile = File(bundleDir, "${id}_camera_poses.bin")
-  val spawn = if (posesFile.isFile) spawnFromCameraPoses(posesFile) else null
+  // Camera poses are extensionless in current splat_fetch.py downloads;
+  // older ones used a .bin suffix.
+  val posesFile =
+      listOf("${id}_camera_poses", "${id}_camera_poses.bin")
+          .map { File(bundleDir, it) }
+          .firstOrNull { it.isFile }
+  val spawn = posesFile?.let { spawnFromCameraPoses(it) }
 
-  val thumbFile = File(bundleDir, "thumb.jpg")
-  val hasThumb = makeThumbnail(File(bundleDir, "${id}_flyby.mp4"), thumbFile)
+  val thumbFile = File(bundleDir, "${id}_thumb.jpg")
+  val flyby = findFlyby(bundleDir, id)
+  if (flyby != null) makeThumbnail(flyby, thumbFile)
 
-  val manifest =
-      JSONObject()
-          .put("id", id)
-          .put("name", name ?: id)
-          .put("splat_file", "$id.spz")
-          .put("splat_count", n)
-          .put("dc_baked", true)
-          .put("sh_mode", "neutral-128")
-          .put("has_thumbnail", hasThumb)
-          .put(
-              "source",
-              JSONObject()
-                  .put("sh_degree", hdr.shDegree)
-                  .put(
-                      "note",
-                      "Hyperscape SPZ: non-standard SH basis; baked to DC-only on device"))
-  if (spawn != null) {
-    manifest.put(
-        "spawn",
-        JSONObject()
-            .put("position", JSONArray(listOf(spawn.x, spawn.y, spawn.z)))
-            .put("yaw_deg", spawn.yawDeg)
-            .put(
-                "forward",
-                spawn.forward?.let { f -> JSONArray(listOf(f.x, f.y, f.z)) }
-                    ?: JSONObject.NULL))
-  }
-  File(bundleDir, "capture.json").writeText(manifest.toString(2))
-  Log.i(TAG, "wrote ${bundleDir.name}/capture.json, spawn=$spawn")
-
-  return BakeResult(id, name ?: id, n, spawn)
+  return BakeResult(id, displayName, n, spawn, hdr.shDegree)
 }
 
 /** Parses and validates the 16-byte SPZ header (little-endian). */

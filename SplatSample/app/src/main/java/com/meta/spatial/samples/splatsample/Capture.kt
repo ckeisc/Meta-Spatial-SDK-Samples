@@ -68,9 +68,18 @@ data class HyperscapeCapture(
     val hasThumbnail: Boolean,
     /**
      * Capture directory on device storage, or null for APK-asset captures.
-     * Expected contents: capture.json, <splatFile>, optional thumb.jpg.
+     * Expected contents: capture.json, `<id>.spz` files, optional
+     * `<id>_thumb.jpg` / `<id>_flyby0.mp4` sidecars.
      */
     val deviceDir: File? = null,
+    /**
+     * True for a `<id>.spz` the folder scan enumerated (Hyperscape splat
+     * enumeration) that no import has baked yet — e.g. a raw bundle
+     * adb-pushed straight into HyperscapeCaptures/. Tapping its tile bakes
+     * it on device first; it is never auto-loaded raw (the non-standard SH
+     * basis would render with black patches).
+     */
+    val needsBake: Boolean = false,
 ) {
   /** URI for the Splat component: "apk:///captures/..." or "file:///sdcard/...". */
   val splatUri: String
@@ -84,30 +93,61 @@ data class HyperscapeCapture(
 
   /** Thumbnail file for device-storage captures, if it exists. */
   val thumbnailFile: File?
-    get() = deviceDir?.let { File(it, "thumb.jpg") }?.takeIf { it.isFile }
+    get() =
+        deviceDir?.let { dir ->
+          // Per-capture thumbs from the multi-spz bake, then the legacy
+          // single-capture thumb.jpg.
+          File(dir, "${id}_thumb.jpg").takeIf { it.isFile }
+              ?: File(dir, "thumb.jpg").takeIf { it.isFile }
+        }
+
+  /**
+   * `<id>_flyby0.mp4` (or legacy `<id>_flyby.mp4`) next to the .spz: the
+   * hover-to-play video thumbnail for this tile, when the sidecar exists.
+   */
+  val videoThumbnailFile: File?
+    get() =
+        deviceDir?.let { dir ->
+          File(dir, "${id}_flyby0.mp4").takeIf { it.isFile }
+              ?: File(dir, "${id}_flyby.mp4").takeIf { it.isFile }
+        }
 }
 
 private const val TAG = "HyperscapeCapture"
 
 /**
- * Parses one capture manifest (capture.json as written by
- * tools/hyperscape_to_quest.py). Shared by the APK-asset and device-storage
- * loaders; returns null when the manifest is unreadable.
+ * Splits a capture.json into its capture entries: the multi-capture
+ * `{"captures": [...]}` shape written by the on-device bake, or the legacy
+ * single-capture shape (the whole object is the entry).
+ */
+fun manifestEntries(manifestJson: String): List<JSONObject> {
+  val root = JSONObject(manifestJson)
+  val arr = root.optJSONArray("captures")
+  if (arr != null) return (0 until arr.length()).map { arr.getJSONObject(it) }
+  return listOf(root)
+}
+
+/**
+ * Parses one capture entry (a JSONObject with id/splat_file/...) as written
+ * by tools/hyperscape_to_quest.py or the on-device bake. Shared by the
+ * APK-asset and device-storage loaders; returns null when the entry is
+ * unreadable.
  *
  * @param dirName directory name of the capture (asset subdir or device folder name)
- * @param manifestJson contents of capture.json
+ * @param entry one capture entry from the manifest
  * @param deviceDir device-storage capture dir, or null for APK-asset captures
  * @param assetThumbExists checks the thumbnail in APK assets (ignored for device captures)
+ * @param needsBake marks an enumerated-but-unbaked <id>.spz (see HyperscapeCapture)
  */
-fun parseCaptureManifest(
+fun parseCaptureEntry(
     dirName: String,
-    manifestJson: String,
+    entry: JSONObject,
     deviceDir: File? = null,
     assetThumbExists: () -> Boolean = { false },
+    needsBake: Boolean = false,
 ): HyperscapeCapture? {
   return try {
-    val manifest = JSONObject(manifestJson)
-    val spawnObj = manifest.optJSONObject("spawn")
+    val spawnObj = entry.optJSONObject("spawn")
     val spawn =
         spawnObj?.let {
           val p = it.getJSONArray("position")
@@ -127,18 +167,41 @@ fun parseCaptureManifest(
           )
         }
     val hasThumb =
-        if (deviceDir != null) File(deviceDir, "thumb.jpg").isFile
-        else manifest.optBoolean("has_thumbnail", false) && assetThumbExists()
+        if (deviceDir != null) {
+          // Per-capture thumb from the multi-spz bake, or the legacy thumb.jpg.
+          val id = entry.optString("id")
+          File(deviceDir, "${id}_thumb.jpg").isFile || File(deviceDir, "thumb.jpg").isFile
+        } else entry.optBoolean("has_thumbnail", false) && assetThumbExists()
     HyperscapeCapture(
-        id = manifest.getString("id"),
-        name = manifest.optString("name", dirName),
+        id = entry.getString("id"),
+        name = entry.optString("name", dirName),
         assetDir = dirName,
-        splatFile = manifest.getString("splat_file"),
-        splatCount = manifest.optInt("splat_count", 0),
+        splatFile = entry.getString("splat_file"),
+        splatCount = entry.optInt("splat_count", 0),
         spawn = spawn,
         hasThumbnail = hasThumb,
         deviceDir = deviceDir,
+        needsBake = needsBake,
     )
+  } catch (e: Exception) {
+    Log.w(TAG, "Skipping capture entry in '$dirName': ${e.message}")
+    null
+  }
+}
+
+/**
+ * Parses one capture manifest (capture.json as written by
+ * tools/hyperscape_to_quest.py). Legacy single-capture shape; see
+ * [parseCaptureEntry] and [manifestEntries] for the multi shape.
+ */
+fun parseCaptureManifest(
+    dirName: String,
+    manifestJson: String,
+    deviceDir: File? = null,
+    assetThumbExists: () -> Boolean = { false },
+): HyperscapeCapture? {
+  return try {
+    parseCaptureEntry(dirName, JSONObject(manifestJson), deviceDir, assetThumbExists)
   } catch (e: Exception) {
     Log.w(TAG, "Skipping capture dir '$dirName': ${e.message}")
     null
@@ -200,9 +263,15 @@ fun loadHyperscapeCaptures(context: Context): List<HyperscapeCapture> {
  * tried without rebuilding the APK. Scans each root for subdirectories shaped
  * like the bake output:
  *
- *   <root>/HyperscapeCaptures/<dir>/capture.json
- *   <root>/HyperscapeCaptures/<dir>/<id>.spz
- *   <root>/HyperscapeCaptures/<dir>/thumb.jpg   (optional)
+ *   <root>/HyperscapeCaptures/<dir>/capture.json   ({"captures": [...]} or legacy single)
+ *   <root>/HyperscapeCaptures/<dir>/<id>.spz        (one tile per .spz)
+ *   <root>/HyperscapeCaptures/<dir>/<id>_thumb.jpg  (optional)
+ *   <root>/HyperscapeCaptures/<dir>/<id>_flyby0.mp4 (optional video thumbnail)
+ *
+ * Hyperscape splat enumeration: every `<id>.spz` in the folder becomes its
+ * own picker tile — not just the first one. A .spz with no manifest entry
+ * (e.g. a raw bundle adb-pushed straight in, never imported) is listed with
+ * needsBake=true; tapping its tile bakes it on device first.
  *
  * Typical roots: the app-specific external files dir (no permission needed,
  * adb-pushable) and Documents/HyperscapeCaptures (needs READ_EXTERNAL_STORAGE
@@ -220,16 +289,43 @@ fun loadDeviceCaptures(roots: List<File>): List<HyperscapeCapture> {
           null
         } ?: continue
     for (dir in dirs) {
+      val covered = mutableSetOf<String>()
       val manifestFile = File(dir, "capture.json")
-      if (!manifestFile.isFile) continue
-      val manifestJson =
-          try {
-            manifestFile.readText()
-          } catch (e: Exception) {
-            Log.w(TAG, "Skipping capture dir '${dir.name}': ${e.message}")
-            continue
+      if (manifestFile.isFile) {
+        try {
+          for (entry in manifestEntries(manifestFile.readText())) {
+            parseCaptureEntry(dir.name, entry, deviceDir = dir)?.let {
+              captures.add(it)
+              covered.add(it.splatFile)
+            }
           }
-      parseCaptureManifest(dir.name, manifestJson, deviceDir = dir)?.let { captures.add(it) }
+        } catch (e: Exception) {
+          Log.w(TAG, "Skipping manifest in '${dir.name}': ${e.message}")
+        }
+      }
+      // Hyperscape splat enumeration: any <id>.spz not described by the
+      // manifest gets its own tile and bakes on demand when tapped.
+      val orphans =
+          dir.listFiles { f -> f.isFile && f.name.endsWith(".spz", ignoreCase = true) }
+              ?.sortedBy { it.name }
+              .orEmpty()
+              .filter { it.name !in covered }
+      for (spz in orphans) {
+        val id = spz.nameWithoutExtension
+        captures.add(
+            HyperscapeCapture(
+                id = id,
+                name = id,
+                assetDir = dir.name,
+                splatFile = spz.name,
+                splatCount = 0,
+                spawn = null,
+                hasThumbnail = false,
+                deviceDir = dir,
+                needsBake = true,
+            ))
+      }
+      if (orphans.isNotEmpty()) Log.i(TAG, "Enumerated ${orphans.size} unbaked .spz in '${dir.name}'")
     }
   }
   if (captures.isNotEmpty()) Log.i(TAG, "Loaded ${captures.size} capture(s) from device storage")
