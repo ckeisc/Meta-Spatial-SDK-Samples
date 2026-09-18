@@ -73,7 +73,11 @@ class SplatSampleActivity : AppSystemActivity() {
   // Entity that holds the Splat component for rendering Gaussian Splats
   private lateinit var splatEntity: Entity
 
-  private val splatList: List<String> = listOf("apk://Menlo Park.spz", "apk://Los Angeles.spz")
+  // Built-in demo splats. Replaced at startup by bundled Hyperscape captures
+  // (app/src/main/assets/captures/) when any are present — see onCreate.
+  private var splatList: List<String> = listOf("apk://Menlo Park.spz", "apk://Los Angeles.spz")
+  private var hyperscapeCaptures: List<HyperscapeCapture> = emptyList()
+  private lateinit var defaultSplatPath: Uri
   private var selectedIndex = mutableStateOf(0)
   /**
    * Controls whether the control panel UI is interactive.
@@ -87,10 +91,10 @@ class SplatSampleActivity : AppSystemActivity() {
    * - Apply a visual "greyed out" effect to indicate the disabled state
    */
   private var isPanelInteractive = mutableStateOf(true)
-  private val defaultSplatPath = splatList[0].toUri()
   private val delayVisibilityMS = 2000L
   // Rotation applied to the Splat to align it with the scene coordinate system
-  // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space
+  // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space.
+  // Hyperscape captures are Z-up like the sample's own assets, so the same rotation applies.
   private val eulerRotation = Vector3(-90f, 0f, 0f)
   private val panelHeight = 1.5f
   private val panelOffset = 2.5f
@@ -115,6 +119,14 @@ class SplatSampleActivity : AppSystemActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    // Prefer bundled Hyperscape captures over the built-in demos when present.
+    // Baked with tools/hyperscape_to_quest.py into assets/captures/.
+    hyperscapeCaptures = loadHyperscapeCaptures(this)
+    if (hyperscapeCaptures.isNotEmpty()) {
+      splatList = hyperscapeCaptures.map { it.splatUri }
+      Log.i("SplatSample", "Using ${hyperscapeCaptures.size} Hyperscape capture(s)")
+    }
+    defaultSplatPath = splatList[0].toUri()
     NetworkedAssetLoader.init(
         File(applicationContext.getCacheDir().canonicalPath),
         OkHttpAssetFetcher(),
@@ -283,6 +295,27 @@ class SplatSampleActivity : AppSystemActivity() {
   }
 
   fun recenterScene() {
+    val captureSpawn = currentCapture()?.spawn
+    if (captureSpawn != null) {
+      // Hyperscape capture: drop the user at the capture camera's start pose,
+      // facing the way it faced. setViewOrigin takes the *tracking-space*
+      // origin (floor level, like the sample's y=0) — not the eye height —
+      // so the headset's own eye height lands where the capture camera was.
+      // The panel goes 1.5 m ahead of the spawn point along the capture
+      // forward vector, turned to face the user.
+      scene.setViewOrigin(captureSpawn.x, 0f, captureSpawn.z, captureSpawn.yawDeg)
+      val fwd = captureSpawn.forward
+      val px = if (fwd != null) captureSpawn.x + fwd.x * 1.5f else captureSpawn.x
+      val pz = if (fwd != null) captureSpawn.z + fwd.z * 1.5f else captureSpawn.z
+      panelEntity.setComponent(
+          Transform(
+              Pose(
+                  Vector3(px, panelHeight, pz),
+                  Quaternion(0f, captureSpawn.yawDeg + 180f, 0f),
+              )),
+      )
+      return
+    }
     var z = laxZ
     if (splatEntity.getComponent<Splat>().path.toString() == defaultSplatPath.toString()) {
       z = mpkZ
@@ -291,6 +324,16 @@ class SplatSampleActivity : AppSystemActivity() {
     panelEntity.setComponent(
         Transform(Pose(Vector3(0f, panelHeight, z - panelOffset), Quaternion(0f, 180f, 0f))),
     )
+  }
+
+  /**
+   * Returns the Hyperscape capture backing the currently loaded splat, or null
+   * for the built-in demo splats.
+   */
+  private fun currentCapture(): HyperscapeCapture? {
+    if (!::splatEntity.isInitialized || hyperscapeCaptures.isEmpty()) return null
+    val path = splatEntity.getComponent<Splat>().path.toString()
+    return hyperscapeCaptures.firstOrNull { it.splatUri == path }
   }
 
   /**
@@ -387,7 +430,9 @@ class SplatSampleActivity : AppSystemActivity() {
           // Pass isPanelInteractive state to control UI interaction during Splat loading
           // When false, the panel images become non-clickable and visually greyed out
           // This prevents users from selecting a new Splat while one is still loading
-          ControlPanel(splatList, selectedIndex, isPanelInteractive, ::loadSplat)
+          // hyperscapeCaptures parallels splatList when bundled captures are present
+          // (empty for the built-in demo splats); used for names and thumbnails.
+          ControlPanel(splatList, hyperscapeCaptures, selectedIndex, isPanelInteractive, ::loadSplat)
         },
     )
   }

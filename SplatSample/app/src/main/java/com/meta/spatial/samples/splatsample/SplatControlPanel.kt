@@ -24,6 +24,7 @@
  */
 package com.meta.spatial.samples.splatsample
 
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -42,12 +43,16 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.State
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -87,6 +92,7 @@ private val panelInstructionText = buildAnnotatedString {
 @Composable
 fun ControlPanel(
     splatList: List<String>,
+    captures: List<HyperscapeCapture>,
     selectedIndex: MutableState<Int>,
     isPanelInteractive: State<Boolean>,
     loadSplatFunction: (String) -> Unit,
@@ -135,6 +141,8 @@ fun ControlPanel(
           splatList.forEachIndexed { index, option ->
             // Each splat option is displayed as a column with image above button
             val isSelected = (index == selectedIndex.value)
+            // When bundled Hyperscape captures back the list, index aligns with captures.
+            val capture = captures.getOrNull(index)
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -142,41 +150,70 @@ fun ControlPanel(
             ) {
               // Large clickable preview image
               val previewResource = getSplatPreviewResource(option)
+              val thumbnailBitmap = captureThumbnail(capture)
               // Visual feedback for loading state:
               // When panel is not interactive (Splat is loading), reduce opacity to 40%
               // This provides a clear visual cue that the panel is temporarily disabled
               val imageAlpha = if (isPanelInteractive.value) 1f else 0.4f
-              if (previewResource != null) {
+              val imageModifier =
+                  Modifier.fillMaxWidth()
+                      .height(200.dp)
+                      // Apply alpha modifier for visual loading state feedback
+                      // 1.0 = fully visible (interactive), 0.4 = greyed out (loading)
+                      .alpha(imageAlpha)
+                      .clip(RoundedCornerShape(12.dp))
+                      .border(
+                          width = if (isSelected) 4.dp else 2.dp,
+                          color =
+                              if (isSelected) Color(0xFF1877F2)
+                              else LocalColorScheme.current.primaryAlphaBackground,
+                          shape = RoundedCornerShape(12.dp),
+                      )
+                      // Disable click handling while Splat is loading
+                      // This prevents race conditions from concurrent load requests
+                      .clickable(enabled = isPanelInteractive.value) {
+                        loadSplatFunction(option)
+                        selectedIndex.value = index
+                      }
+              // Prefer the capture thumbnail from assets; fall back to the
+              // built-in drawable previews used by the demo splats.
+              if (thumbnailBitmap != null) {
+                Image(
+                    bitmap = thumbnailBitmap,
+                    contentDescription = "Preview of $option",
+                    modifier = imageModifier,
+                    contentScale = ContentScale.Crop,
+                )
+              } else if (previewResource != null) {
                 Image(
                     painter = painterResource(id = previewResource),
                     contentDescription = "Preview of $option",
-                    modifier =
-                        Modifier.fillMaxWidth()
-                            .height(200.dp)
-                            // Apply alpha modifier for visual loading state feedback
-                            // 1.0 = fully visible (interactive), 0.4 = greyed out (loading)
-                            .alpha(imageAlpha)
-                            .clip(RoundedCornerShape(12.dp))
-                            .border(
-                                width = if (isSelected) 4.dp else 2.dp,
-                                color =
-                                    if (isSelected) Color(0xFF1877F2)
-                                    else LocalColorScheme.current.primaryAlphaBackground,
-                                shape = RoundedCornerShape(12.dp),
-                            )
-                            // Disable click handling while Splat is loading
-                            // This prevents race conditions from concurrent load requests
-                            .clickable(enabled = isPanelInteractive.value) {
-                              loadSplatFunction(option)
-                              selectedIndex.value = index
-                            },
+                    modifier = imageModifier,
                     contentScale = ContentScale.Crop,
                 )
+              } else {
+                // No preview image available (typical for baked captures without
+                // a flyby thumbnail): tappable placeholder tile so the capture
+                // stays selectable. imageModifier already carries the click handler.
+                Box(
+                    modifier =
+                        imageModifier.background(
+                            LocalColorScheme.current.primaryAlphaBackground.copy(alpha = 0.12f),
+                            RoundedCornerShape(12.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                  Text(
+                      text = "No preview",
+                      style = SpatialTheme.typography.body1,
+                      color = LocalColorScheme.current.primaryAlphaBackground.copy(alpha = 0.7f),
+                  )
+                }
               }
 
               // Label below image
               Text(
-                  text = getSplatDisplayName(option),
+                  text = getSplatDisplayName(option, capture),
                   style = SpatialTheme.typography.headline2Strong,
                   color =
                       if (isSelected) Color(0xFF1877F2)
@@ -216,8 +253,32 @@ fun getSplatPreviewResource(splatPath: String): Int? {
 
 /**
  * Extracts a clean display name from the splat file path. Removes "apk://" prefix and ".spz"
- * extension.
+ * extension. Hyperscape captures use their baked name (and splat count) instead.
  */
-fun getSplatDisplayName(splatPath: String): String {
+fun getSplatDisplayName(splatPath: String, capture: HyperscapeCapture? = null): String {
+  if (capture != null) {
+    val count = capture.splatCount
+    return if (count > 0) "${capture.name} (${count / 1000}k)" else capture.name
+  }
   return splatPath.replace("apk://", "").replace(".spz", "")
+}
+
+/**
+ * Loads a Hyperscape capture's thumbnail (thumb.jpg) from APK assets, if the
+ * bake produced one. Returns null when there is none — the caller falls back
+ * to the built-in drawable previews.
+ */
+@Composable
+fun captureThumbnail(capture: HyperscapeCapture?): ImageBitmap? {
+  if (capture?.hasThumbnail != true) return null
+  val context = LocalContext.current
+  return remember(capture.id) {
+    try {
+      context.assets.open(capture.thumbnailAssetPath).use { stream ->
+        BitmapFactory.decodeStream(stream)?.asImageBitmap()
+      }
+    } catch (e: Exception) {
+      null
+    }
+  }
 }
