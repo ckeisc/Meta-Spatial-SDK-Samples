@@ -21,6 +21,7 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 import kotlin.io.nameWithoutExtension
 import kotlin.math.atan2
+import kotlin.math.ln
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -36,6 +37,8 @@ private data class SpzHeader(val shDegree: Int, val fracBits: Int, val flags: In
 data class BakeOptions(
     val minVisibility: Int = 0,
     val maxSplats: Int = 0,
+    /** Hole-filling: multiply each Gaussian's 3D sigma by this (1.0 = off). */
+    val inflate: Float = 1.3f,
 )
 
 /** What bakeHyperscapeBundle produced, per .spz. */
@@ -45,6 +48,7 @@ data class BakeResult(
     val splatCount: Int,
     val spawn: CaptureSpawn?,
     val shDegree: Int,
+    val inflate: Float,
 )
 
 /**
@@ -60,7 +64,8 @@ data class BakeResult(
  *
  * Every .spz in the folder is baked (Hyperscape splat enumeration): each
  * becomes its own selectable capture tile. Steps per .spz: parse SPZ v2 ->
- * optional visibility filter -> optional decimation -> DC-bake (neutralize
+ * optional visibility filter -> optional decimation -> inflate 3D sigma
+ * (hole-filling, vkraygs#2) -> DC-bake (neutralize
  * the non-standard SH coefficients to packed 128 = 0.0 so Meta's closed
  * renderer shows correct DC-only colors) -> gzip. Writes the baked `<id>.spz` over the raw file, `<id>_thumb.jpg`
  * (via MediaMetadataRetriever, no ffmpeg on device), and a single
@@ -99,8 +104,8 @@ fun bakeHyperscapeBundle(
  * entry into `capture.json`'s "captures" list (preserving the other entries).
  * This is the lazy path for .spz files the folder scan enumerated but no
  * import baked yet — e.g. a raw Hyperscape bundle adb-pushed straight into
- * HyperscapeCaptures/. Re-baking an already-baked .spz is harmless (the
- * DC-bake just re-neutralizes the SH chunk), so no baked-marker is needed.
+ * HyperscapeCaptures/. Must only be called on raw (unbaked) files: the
+ * inflate step is not idempotent, so re-baking would scale sigma twice.
  */
 fun bakeSingleSpz(
     bundleDir: File,
@@ -163,6 +168,7 @@ private fun manifestEntry(r: BakeResult, hasThumb: Boolean): JSONObject {
           .put("splat_count", r.splatCount)
           .put("dc_baked", true)
           .put("sh_mode", "neutral-128")
+          .put("inflate", r.inflate)
           .put("has_thumbnail", hasThumb)
           .put(
               "source",
@@ -186,8 +192,8 @@ private fun manifestEntry(r: BakeResult, hasThumb: Boolean): JSONObject {
 }
 
 /**
- * Bakes one raw `<id>.spz`: filters -> DC-bake (overwrites the file in
- * place) -> `<id>_thumb.jpg` from the flyby video when present.
+ * Bakes one raw `<id>.spz`: filters -> inflate -> DC-bake (overwrites the
+ * file in place) -> `<id>_thumb.jpg` from the flyby video when present.
  */
 private fun bakeOneSpz(
     bundleDir: File,
@@ -220,6 +226,14 @@ private fun bakeOneSpz(
     n = keep.size
   }
 
+  // Hole-filling: inflate 3D sigma (mirrors vkraygs PR ckeisc/vkraygs#2,
+  // final inflate-only state). Runs on the raw bytes before dcBake gzips.
+  // NOT idempotent: re-baking re-applies the scaling, so baked files must
+  // not be re-baked (see bakeSingleSpz).
+  if (opts.inflate != 1.0f) {
+    data = inflateScales(data, n, opts.inflate)
+  }
+
   // DC-bake + gzip, overwriting the raw .spz with the baked one (same name
   // the manifest points at).
   spzFile.writeBytes(dcBake(data, hdr, n))
@@ -237,7 +251,28 @@ private fun bakeOneSpz(
   val flyby = findFlyby(bundleDir, id)
   if (flyby != null) makeThumbnail(flyby, thumbFile)
 
-  return BakeResult(id, displayName, n, spawn, hdr.shDegree)
+  return BakeResult(id, displayName, n, spawn, hdr.shDegree, opts.inflate)
+}
+
+/**
+ * Hole-filling: multiply each Gaussian's 3D sigma by [factor], applied as
+ * += ln(factor) on the SPZ log-scales (sigma = exp(byte/16 - 10)).
+ * Mirrors vkraygs PR ckeisc/vkraygs#2 (final inflate-only state), where the
+ * same scaling is a GPU shader uniform defaulting to 1.3. factor=1.0 is a
+ * no-op. NOT idempotent: re-baking an inflated file inflates it again.
+ */
+private fun inflateScales(data: ByteArray, n: Int, factor: Float): ByteArray {
+  require(factor > 0) { "inflate factor must be positive, got $factor" }
+  if (factor == 1.0f) return data
+  val delta = Math.round(16 * ln(factor.toDouble())).toInt()
+  if (delta == 0) return data
+  val out = data.copyOf()
+  val base = 16 + n * (9 + 1 + 3) // header + positions + alphas + colors
+  for (i in 0 until 3 * n) {
+    out[base + i] = ((out[base + i].toInt() and 0xFF) + delta).coerceIn(0, 255).toByte()
+  }
+  Log.i(TAG, "inflate x$factor: sigma scaled (+$delta on log-scale bytes)")
+  return out
 }
 
 /** Parses and validates the 16-byte SPZ header (little-endian). */

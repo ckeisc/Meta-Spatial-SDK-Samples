@@ -47,7 +47,10 @@ quest_assets/index.json   {"captures": [...]}  — regenerated/merged each run
 
 Useful flags: `--strip-sh-degree` (truncate SH + set degree 0 instead of
 neutral-128; smaller but untested against Meta's loader),
-`--min-visibility K`, `--max-splats N`.
+`--min-visibility K`, `--max-splats N`, `--inflate F` (hole-filling:
+multiply each Gaussian's 3D sigma by F, default 1.3, `1.0` = off; mirrors
+vkraygs PR ckeisc/vkraygs#2, whose GPU-side inflate 1.3 closed the holes in
+the garage scan. Not idempotent — never re-bake an inflated file).
 
 Then copy into the app:
 
@@ -160,4 +163,4 @@ app-specific dir is picked up on the next launch.
 | `.../splatsample/Capture.kt` | Capture loading: APK assets + device storage (`Documents/HyperscapeCaptures`, app files dir); multi-`.spz` enumeration, `needsBake` tiles, `<id>_flyby0.mp4` video thumbnails |
 | `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter, Documents permission, folder-picker import, A-button panel toggle, on-demand bake |
 | `.../splatsample/SplatControlPanel.kt` | Scrollable capture picker + thumbnails + hover-to-play video tiles + "Open capture folder…" button |
-| `.../splatsample/HyperscapeBake.kt` | On-device port of the bake script: SPZ v2 parse, DC-bake, visibility filter, decimation, spawn from camera poses, thumbnail via MediaMetadataRetriever, `capture.json` manifest |
+| `.../splatsample/HyperscapeBake.kt` | On-device port of the bake script: SPZ v2 parse, DC-bake, visibility filter, decimation, sigma inflate (hole-filling), spawn from camera poses, thumbnail via MediaMetadataRetriever, `capture.json` manifest |
