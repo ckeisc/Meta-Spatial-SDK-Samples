@@ -111,42 +111,6 @@ def dc_bake(data, hdr, zero_sh=True):
     return gzip.compress(bytes(out), compresslevel=9)
 
 
-def load_cluster_views(centroids_path):
-    """Cluster 'views' = per-cluster viewpoint positions in Hyperscape world meters (Z-up)."""
-    j = json.load(open(centroids_path))
-    return j['views']
-
-
-def outlier_filter(data, hdr, views, margin=8.0):
-    """Drop splats far outside the captured space (the 'stray floaters').
-
-    Hyperscape hides these at runtime via per-cluster visibility culling
-    (od_cluster_masks). Meta's renderer can't do that, so the bake removes
-    them: keep splats inside bbox(cluster views) expanded by `margin` meters.
-    Falls back to a percentile box when no centroids file is available.
-    Returns (filtered_data, kept_count).
-    """
-    import numpy as np
-    n = hdr['n']
-    pos = np.frombuffer(data[16:16 + n * 9], dtype=np.uint8).reshape(n, 9)
-    xyz = np.zeros((n, 3), np.float64)
-    for a in range(3):
-        v = (pos[:, 3 * a].astype(np.int64) | (pos[:, 3 * a + 1].astype(np.int64) << 8) |
-             (pos[:, 3 * a + 2].astype(np.int64) << 16))
-        xyz[:, a] = np.where(v >= 1 << 23, v - (1 << 24), v) / float(1 << hdr['frac_bits'])
-    if views:
-        v = np.array(views, dtype=np.float64)
-        lo, hi = v.min(0) - margin, v.max(0) + margin
-    else:
-        lo = np.percentile(xyz, 0.5, axis=0)
-        hi = np.percentile(xyz, 99.5, axis=0)
-    keep = np.flatnonzero(((xyz >= lo) & (xyz <= hi)).all(axis=1))
-    print(f'outlier filter: bbox lo={lo.round(2)} hi={hi.round(2)} -> kept {len(keep)}/{n}')
-    if len(keep) == n:
-        return data, n
-    return _gather(data, hdr, keep)
-
-
 def _gather(data, hdr, keep):
     """Rebuild the legacy SPZ stream keeping only `keep` indices."""
     import numpy as np
@@ -169,7 +133,7 @@ def visibility_filter(data, hdr, masks_path, min_visible):
 
     cluster_masks.bin is N uint64s; bit i = splat visible from cluster i.
     (Kept as an option; on the garage scan every splat is visible from >=17
-    clusters, so this is a no-op there — outlier_filter does the real work.)
+    clusters, so this is a no-op there.)
     """
     import numpy as np
     n = hdr['n']
@@ -265,10 +229,6 @@ def main():
                     help='drop splats visible from fewer than K of 64 clusters (0=keep all)')
     ap.add_argument('--max-splats', type=int, default=0,
                     help='uniform-decimate to N splats (0=no decimation)')
-    ap.add_argument('--no-outlier-filter', action='store_true',
-                    help='skip floater/outlier removal')
-    ap.add_argument('--outlier-margin', type=float, default=8.0,
-                    help='meters beyond cluster-view bbox to keep (default 8)')
     ap.add_argument('--name', default=None)
     args = ap.parse_args()
 
@@ -283,11 +243,6 @@ def main():
         data, n = visibility_filter(
             data, hdr, os.path.join(bdir, f'{cid}_cluster_masks.bin'),
             args.min_visibility)
-        hdr = dict(hdr, n=n)
-    if not args.no_outlier_filter:
-        cpath = os.path.join(bdir, f'{cid}_cluster_centroids.json')
-        views = load_cluster_views(cpath) if os.path.exists(cpath) else None
-        data, n = outlier_filter(data, hdr, views, margin=args.outlier_margin)
         hdr = dict(hdr, n=n)
     if args.max_splats > 0 and n > args.max_splats:
         data, n = decimate_uniform(data, hdr, args.max_splats)

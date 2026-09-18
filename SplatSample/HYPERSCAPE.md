@@ -24,13 +24,6 @@ Neutral value = **packed byte 128, not 0**: the SPZ codec maps
 `unpacked = (packed − 128) / 128`, so 0 would decode to coefficient −1.0.
 128 decodes to exactly 0.0 in every spec-compliant loader.
 
-A second bake step removes **far outlier splats ("floaters")**. Hyperscape
-hides these at runtime with per-cluster visibility culling
-(`od_cluster_masks`, 64 uint64 bitmasks); the public Splat API has no
-equivalent, so the bake keeps the conservative subset: splats inside
-`bbox(cluster views) + 8 m margin`. On the garage scan this removed 4.1% of
-splats (372,938 → 357,584).
-
 ## Bake a capture (PC, Python 3 + numpy)
 
 ```bash
@@ -53,8 +46,8 @@ quest_assets/index.json   {"captures": [...]}  — regenerated/merged each run
 ```
 
 Useful flags: `--strip-sh-degree` (truncate SH + set degree 0 instead of
-neutral-128; smaller but untested against Meta's loader), `--no-outlier-filter`,
-`--outlier-margin M`, `--min-visibility K`, `--max-splats N`.
+neutral-128; smaller but untested against Meta's loader),
+`--min-visibility K`, `--max-splats N`.
 
 Then copy into the app:
 
@@ -95,8 +88,8 @@ committed) — they live only in your local checkout for building.
   captures render DC-only (no specular/view shift). Correct colors, flat
   lighting response.
 - **Runtime cluster culling**: `cluster_masks.bin` can't be consumed by the
-  closed renderer (single Splat entity per scene anyway). The bake's outlier
-  filter is the static equivalent; per-view culling granularity is lost.
+  closed renderer (single Splat entity per scene anyway), so per-view
+  occlusion culling granularity is lost; the bake keeps all splats.
 - **Scene mesh**: `MeshCollision` exposes only `NoCollision`, so the capture's
   scene mesh can't become a collider through the public API. Locomotion works
   through the splat itself (`SupportsLocomotion`, per the 0.9.0 changelog).
@@ -123,9 +116,9 @@ kinds are accepted:
 - **Baked** (`capture.json` + `<id>.spz`, as the PC script writes): used as-is.
 - **Raw Hyperscape bundle** (one or more `<id>.spz` + `<id>_camera_poses` +
   optional cluster files / flyby mp4s, as `splat_fetch.py` downloads): the app
-  bakes every `.spz` on device — DC-bake, outlier filter, spawn pose,
-  manifest — so no PC step is needed. Each `.spz` becomes its own picker
-  tile (Hyperscape splat enumeration). Thumbnails come from the
+  bakes every `.spz` on device — DC-bake, spawn pose, manifest — so no PC
+  step is needed. Each `.spz` becomes its own picker tile (Hyperscape splat
+  enumeration). Thumbnails come from the
   `<id>_flyby0.mp4` sidecars: each tile shows the flyby as a video thumbnail
   that auto-plays (muted, looping) only while the cursor hovers the tile.
 
@@ -158,9 +151,9 @@ app-specific dir is picked up on the next launch.
 
 | Path | What |
 |---|---|
-| `SplatSample/tools/hyperscape_to_quest.py` | PC bake script (SPZ v2 parser, DC-bake, outlier filter, spawn, manifest) |
+| `SplatSample/tools/hyperscape_to_quest.py` | PC bake script (SPZ v2 parser, DC-bake, spawn, manifest) |
 | `SplatSample/app/src/main/assets/captures/` | Baked captures bundled in the APK (git-ignored; personal scan data) |
 | `.../splatsample/Capture.kt` | Capture loading: APK assets + device storage (`Documents/HyperscapeCaptures`, app files dir); multi-`.spz` enumeration, `needsBake` tiles, `<id>_flyby0.mp4` video thumbnails |
 | `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter, Documents permission, folder-picker import, A-button panel toggle, on-demand bake |
 | `.../splatsample/SplatControlPanel.kt` | Scrollable capture picker + thumbnails + hover-to-play video tiles + "Open capture folder…" button |
-| `.../splatsample/HyperscapeBake.kt` | On-device port of the bake script: SPZ v2 parse, DC-bake, outlier/visibility filters, decimation, spawn from camera poses, thumbnail via MediaMetadataRetriever, `capture.json` manifest |
+| `.../splatsample/HyperscapeBake.kt` | On-device port of the bake script: SPZ v2 parse, DC-bake, visibility filter, decimation, spawn from camera poses, thumbnail via MediaMetadataRetriever, `capture.json` manifest |

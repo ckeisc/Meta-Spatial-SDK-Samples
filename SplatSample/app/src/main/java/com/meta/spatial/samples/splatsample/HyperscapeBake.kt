@@ -36,8 +36,6 @@ private data class SpzHeader(val shDegree: Int, val fracBits: Int, val flags: In
 data class BakeOptions(
     val minVisibility: Int = 0,
     val maxSplats: Int = 0,
-    val noOutlierFilter: Boolean = false,
-    val outlierMargin: Double = 8.0,
 )
 
 /** What bakeHyperscapeBundle produced, per .spz. */
@@ -62,10 +60,9 @@ data class BakeResult(
  *
  * Every .spz in the folder is baked (Hyperscape splat enumeration): each
  * becomes its own selectable capture tile. Steps per .spz: parse SPZ v2 ->
- * optional visibility filter -> outlier (floater) filter -> optional
- * decimation -> DC-bake (neutralize the non-standard SH coefficients to
- * packed 128 = 0.0 so Meta's closed renderer shows correct DC-only colors)
- * -> gzip. Writes the baked `<id>.spz` over the raw file, `<id>_thumb.jpg`
+ * optional visibility filter -> optional decimation -> DC-bake (neutralize
+ * the non-standard SH coefficients to packed 128 = 0.0 so Meta's closed
+ * renderer shows correct DC-only colors) -> gzip. Writes the baked `<id>.spz` over the raw file, `<id>_thumb.jpg`
  * (via MediaMetadataRetriever, no ffmpeg on device), and a single
  * `capture.json` holding a "captures" list with one entry per .spz.
  *
@@ -216,17 +213,6 @@ private fun bakeOneSpz(
       n = keep.size
     }
   }
-  // Outlier filter: drop splats far outside the captured space (the stray
-  // floaters Hyperscape hides via cluster culling, which the public Splat
-  // API cannot express).
-  if (!opts.noOutlierFilter) {
-    val centroidsFile = File(bundleDir, "${id}_cluster_centroids.json")
-    val views = if (centroidsFile.isFile) loadClusterViews(centroidsFile) else null
-    outlierFilter(data, n, hdr.fracBits, views, opts.outlierMargin)?.let { keep ->
-      data = gather(data, hdr, n, keep)
-      n = keep.size
-    }
-  }
   // Optional uniform decimation.
   if (opts.maxSplats > 0 && n > opts.maxSplats) {
     val keep = decimate(n, opts.maxSplats)
@@ -333,76 +319,6 @@ private fun gather(data: ByteArray, hdr: SpzHeader, n: Int, keep: IntArray): Byt
 }
 
 /**
- * Drops splats far outside the captured space. Keeps splats inside
- * bbox(cluster views) expanded by [margin] meters, or a percentile box when
- * no centroids file is available. Returns null when everything is kept.
- */
-private fun outlierFilter(
-    data: ByteArray,
-    n: Int,
-    fracBits: Int,
-    views: List<DoubleArray>?,
-    margin: Double,
-): IntArray? {
-  val inv = 1.0 / (1L shl fracBits).toDouble()
-  val xs = DoubleArray(n)
-  val ys = DoubleArray(n)
-  val zs = DoubleArray(n)
-  for (i in 0 until n) {
-    val b = 16 + i * 9
-    val c = IntArray(3)
-    for (a in 0..2) {
-      val v =
-          (data[b + 3 * a].toInt() and 0xFF) or
-              ((data[b + 3 * a + 1].toInt() and 0xFF) shl 8) or
-              ((data[b + 3 * a + 2].toInt() and 0xFF) shl 16)
-      // 24-bit fixed point, sign-extended.
-      c[a] = if (v >= (1 shl 23)) v - (1 shl 24) else v
-    }
-    xs[i] = c[0] * inv
-    ys[i] = c[1] * inv
-    zs[i] = c[2] * inv
-  }
-  val lo: DoubleArray
-  val hi: DoubleArray
-  if (!views.isNullOrEmpty()) {
-    lo = doubleArrayOf(Double.MAX_VALUE, Double.MAX_VALUE, Double.MAX_VALUE)
-    hi = doubleArrayOf(-Double.MAX_VALUE, -Double.MAX_VALUE, -Double.MAX_VALUE)
-    for (v in views) {
-      for (a in 0..2) {
-        lo[a] = minOf(lo[a], v[a])
-        hi[a] = maxOf(hi[a], v[a])
-      }
-    }
-    for (a in 0..2) {
-      lo[a] -= margin
-      hi[a] += margin
-    }
-  } else {
-    // numpy.percentile default (method='linear'): rank = p/100*(n-1),
-    // lerp between the bracketing sorted values.
-    fun pct(arr: DoubleArray, p: Double): Double {
-      val s = arr.sortedArray()
-      if (s.size == 1) return s[0]
-      val rank = p / 100.0 * (s.size - 1)
-      val j = rank.toInt().coerceIn(0, s.size - 2)
-      val g = rank - j
-      return s[j] + g * (s[j + 1] - s[j])
-    }
-    lo = doubleArrayOf(pct(xs, 0.5), pct(ys, 0.5), pct(zs, 0.5))
-    hi = doubleArrayOf(pct(xs, 99.5), pct(ys, 99.5), pct(zs, 99.5))
-  }
-  val keep = ArrayList<Int>(n)
-  for (i in 0 until n) {
-    if (xs[i] in lo[0]..hi[0] && ys[i] in lo[1]..hi[1] && zs[i] in lo[2]..hi[2]) {
-      keep.add(i)
-    }
-  }
-  Log.i(TAG, "outlier filter: kept ${keep.size}/$n")
-  return if (keep.size == n) null else keep.toIntArray()
-}
-
-/**
  * Drops splats visible from fewer than [minVisible] of the 64 clusters.
  * cluster_masks.bin holds N little-endian uint64s; bit i = splat visible
  * from cluster i. Returns null when everything is kept.
@@ -425,20 +341,6 @@ private fun decimate(n: Int, target: Int): IntArray {
   idx.shuffle(rng)
   Log.i(TAG, "decimated $n -> $target splats (uniform)")
   return idx.take(target).sorted().toIntArray()
-}
-
-/** Cluster 'views' = per-cluster viewpoint positions in Hyperscape world meters (Z-up). */
-private fun loadClusterViews(f: File): List<DoubleArray>? {
-  return try {
-    val arr = JSONObject(f.readText()).optJSONArray("views") ?: return null
-    List(arr.length()) { i ->
-      val v = arr.getJSONArray(i)
-      doubleArrayOf(v.getDouble(0), v.getDouble(1), v.getDouble(2))
-    }
-  } catch (e: Exception) {
-    Log.w(TAG, "cannot parse cluster views", e)
-    null
-  }
 }
 
 /**
