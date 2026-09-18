@@ -7,12 +7,18 @@
 
 package com.meta.spatial.samples.splatsample
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.util.Log
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.platform.ComposeView
+import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.meta.spatial.compose.ComposeFeature
 import com.meta.spatial.compose.ComposeViewPanelRegistration
@@ -75,10 +81,17 @@ class SplatSampleActivity : AppSystemActivity() {
   // Entity that holds the Splat component for rendering Gaussian Splats
   private lateinit var splatEntity: Entity
 
-  // Built-in demo splats. Replaced at startup by bundled Hyperscape captures
-  // (app/src/main/assets/captures/) when any are present — see onCreate.
-  private var splatList: List<String> = listOf("apk://Menlo Park.spz", "apk://Los Angeles.spz")
-  private var hyperscapeCaptures: List<HyperscapeCapture> = emptyList()
+  // Built-in demo splats, shown when no Hyperscape captures are available.
+  private val demoSplats: List<String> = listOf("apk://Menlo Park.spz", "apk://Los Angeles.spz")
+  // All known Hyperscape captures: device storage first, then APK assets.
+  // State so the panel picker recomposes when the list refreshes (e.g. after
+  // the Documents permission is granted).
+  private var capturesState = mutableStateOf<List<HyperscapeCapture>>(emptyList())
+
+  /** Effective picker list: capture URIs, or the demo splats when none exist. */
+  private fun effectiveSplatList(): List<String> =
+      capturesState.value.map { it.splatUri }.ifEmpty { demoSplats }
+
   private lateinit var defaultSplatPath: Uri
   private var selectedIndex = mutableStateOf(0)
   /**
@@ -98,6 +111,14 @@ class SplatSampleActivity : AppSystemActivity() {
   // Remembers which splat the user picked so the next launch opens on it
   // instead of always defaulting to the first entry.
   private val prefs by lazy { getSharedPreferences("splat_sample_prefs", MODE_PRIVATE) }
+
+  // Asks for read access to Documents/ so captures can be sideloaded there.
+  // On grant the capture list is rescanned and the picker updates.
+  private val documentsPermissionLauncher =
+      registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        Log.i("SplatSample", "Documents permission granted=$granted")
+        if (granted) refreshCaptures()
+      }
 
   // Rotation applied to the Splat to align it with the scene coordinate system
   // -90 degrees on X axis converts from original Splat coordinate space to Spatial SDK space.
@@ -126,17 +147,14 @@ class SplatSampleActivity : AppSystemActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
-    // Prefer bundled Hyperscape captures over the built-in demos when present.
-    // Baked with tools/hyperscape_to_quest.py into assets/captures/.
-    hyperscapeCaptures = loadHyperscapeCaptures(this)
-    if (hyperscapeCaptures.isNotEmpty()) {
-      splatList = hyperscapeCaptures.map { it.splatUri }
-      Log.i("SplatSample", "Using ${hyperscapeCaptures.size} Hyperscape capture(s)")
-    }
-    // Restore the user's last pick (clamped in case the bundled set changed);
+    // Captures come from device storage (sideloaded, no rebuild needed) and
+    // APK assets; device captures win the top spots in the picker.
+    refreshCaptures()
+    val list = effectiveSplatList()
+    // Restore the user's last pick (clamped in case the set changed);
     // fall back to the first splat on a fresh install.
-    selectedIndex.value = prefs.getInt(KEY_SELECTED_SPLAT, 0).coerceIn(splatList.indices)
-    defaultSplatPath = splatList[selectedIndex.value].toUri()
+    selectedIndex.value = prefs.getInt(KEY_SELECTED_SPLAT, 0).coerceIn(list.indices)
+    defaultSplatPath = list[selectedIndex.value].toUri()
     NetworkedAssetLoader.init(
         File(applicationContext.getCacheDir().canonicalPath),
         OkHttpAssetFetcher(),
@@ -167,6 +185,54 @@ class SplatSampleActivity : AppSystemActivity() {
       initializeSplat(defaultSplatPath)
       setSplatVisibility(false)
     }
+    // Ask for Documents access so captures can be sideloaded to
+    // Documents/HyperscapeCaptures without rebuilding the APK. The
+    // app-specific external files dir works without this permission.
+    if (!hasDocumentsAccess() && Build.VERSION.SDK_INT <= 32) {
+      documentsPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+    }
+  }
+
+  /**
+   * (Re)scans for Hyperscape captures: device storage first, then APK assets.
+   * Called at startup and again if the Documents permission is granted later.
+   */
+  private fun refreshCaptures() {
+    val assetCaptures = loadHyperscapeCaptures(this)
+    val deviceCaptures = loadDeviceCaptures(deviceCaptureRoots())
+    val merged = deviceCaptures + assetCaptures
+    if (merged.map { it.splatUri } != capturesState.value.map { it.splatUri }) {
+      capturesState.value = merged
+      selectedIndex.value = selectedIndex.value.coerceIn(effectiveSplatList().indices)
+      Log.i(
+          "SplatSample",
+          "Captures: ${deviceCaptures.size} on device, ${assetCaptures.size} in assets")
+    }
+  }
+
+  /**
+   * Roots scanned for sideloaded captures (each gets a "HyperscapeCaptures"
+   * subfolder; see loadDeviceCaptures).
+   * - App-specific external files dir: no permission needed, adb-pushable.
+   * - Documents/: the shared folder the user asked for; needs
+   *   READ_EXTERNAL_STORAGE on API <= 32, requested at startup.
+   */
+  private fun deviceCaptureRoots(): List<File> {
+    val roots = mutableListOf<File>()
+    getExternalFilesDir(null)?.let { roots.add(it) }
+    if (hasDocumentsAccess()) {
+      @Suppress("DEPRECATION")
+      val docs = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+      roots.add(docs)
+    }
+    return roots
+  }
+
+  /** True when the app may read Documents/HyperscapeCaptures. */
+  private fun hasDocumentsAccess(): Boolean {
+    if (Build.VERSION.SDK_INT > 32) return false // scoped storage: app dir only
+    return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) ==
+        PackageManager.PERMISSION_GRANTED
   }
 
   @OptIn(SpatialSDKInternalTestingAPI::class)
@@ -260,7 +326,7 @@ class SplatSampleActivity : AppSystemActivity() {
   fun loadSplat(newSplatPath: String) {
     // Remember the pick so the next launch restores it (single source of
     // truth for selectedIndex; the panel also sets it on tap).
-    val newIndex = splatList.indexOf(newSplatPath)
+    val newIndex = effectiveSplatList().indexOf(newSplatPath)
     if (newIndex >= 0) {
       selectedIndex.value = newIndex
       prefs.edit().putInt(KEY_SELECTED_SPLAT, newIndex).apply()
@@ -348,9 +414,9 @@ class SplatSampleActivity : AppSystemActivity() {
    * for the built-in demo splats.
    */
   private fun currentCapture(): HyperscapeCapture? {
-    if (!::splatEntity.isInitialized || hyperscapeCaptures.isEmpty()) return null
+    if (!::splatEntity.isInitialized || capturesState.value.isEmpty()) return null
     val path = splatEntity.getComponent<Splat>().path.toString()
-    return hyperscapeCaptures.firstOrNull { it.splatUri == path }
+    return capturesState.value.firstOrNull { it.splatUri == path }
   }
 
   /**
@@ -447,9 +513,14 @@ class SplatSampleActivity : AppSystemActivity() {
           // Pass isPanelInteractive state to control UI interaction during Splat loading
           // When false, the panel images become non-clickable and visually greyed out
           // This prevents users from selecting a new Splat while one is still loading
-          // hyperscapeCaptures parallels splatList when bundled captures are present
-          // (empty for the built-in demo splats); used for names and thumbnails.
-          ControlPanel(splatList, hyperscapeCaptures, selectedIndex, isPanelInteractive, ::loadSplat)
+          // Reading capturesState here makes the picker recompose when the
+          // capture list refreshes (e.g. after the Documents permission grant).
+          ControlPanel(
+              effectiveSplatList(),
+              capturesState.value,
+              selectedIndex,
+              isPanelInteractive,
+              ::loadSplat)
         },
     )
   }

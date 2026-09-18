@@ -265,19 +265,25 @@ fun getSplatDisplayName(splatPath: String, capture: HyperscapeCapture? = null): 
 }
 
 /**
- * Loads a Hyperscape capture's thumbnail (thumb.jpg) from APK assets, if the
- * bake produced one. Returns null when there is none — the caller falls back
+ * Loads a Hyperscape capture's thumbnail (thumb.jpg), if the bake produced
+ * one. Device-storage captures read from their folder; APK-asset captures
+ * read from assets. Returns null when there is none — the caller falls back
  * to the built-in drawable previews.
  */
 @Composable
 fun captureThumbnail(capture: HyperscapeCapture?): ImageBitmap? {
-  if (capture?.hasThumbnail != true) return null
+  if (capture == null) return null
   val context = LocalContext.current
-  return remember(capture.id) {
+  return remember(capture.id, capture.deviceDir?.absolutePath) {
     try {
-      context.assets.open(capture.thumbnailAssetPath).use { stream ->
-        BitmapFactory.decodeStream(stream)?.asImageBitmap()
-      }
+      val stream =
+          capture.thumbnailFile?.inputStream()
+              ?: if (capture.hasThumbnail) {
+                context.assets.open(capture.thumbnailAssetPath)
+              } else {
+                null
+              }
+      stream?.use { BitmapFactory.decodeStream(it)?.asImageBitmap() }
     } catch (e: Exception) {
       null
     }

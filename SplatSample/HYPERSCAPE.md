@@ -112,12 +112,33 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 Press **B** on the right controller to recenter/spawn; **A** snaps the panel
 in front of you. First load takes a few seconds (357k splats decode).
 
+## Sideload captures without rebuilding (Quest 3)
+
+The app scans device storage for baked captures at startup, so new scans can
+be tried without another `assembleDebug` cycle. Bake on the PC as usual, then
+push the capture folder to either location:
+
+```powershell
+# Option A — Documents (shared folder; the app asks for read access on first launch)
+adb push <baked-capture-dir> /sdcard/Documents/HyperscapeCaptures/
+
+# Option B — app-specific dir (no permission needed)
+adb push <baked-capture-dir> /sdcard/Android/data/com.meta.spatial.samples.splatsample/files/HyperscapeCaptures/
+```
+
+`<baked-capture-dir>` is the folder the bake script wrote
+(`capture.json`, `<id>.spz`, optional `thumb.jpg`). Device captures appear at
+the top of the panel picker and use `file://` URIs, so they load exactly like
+bundled ones — spawn pose, thumbnails, and all. Granting the Documents
+permission rescans and the picker updates live; the app-specific dir is picked
+up on the next launch.
+
 ## File map
 
 | Path | What |
 |---|---|
 | `SplatSample/tools/hyperscape_to_quest.py` | PC bake script (SPZ v2 parser, DC-bake, outlier filter, spawn, manifest) |
-| `SplatSample/app/src/main/assets/captures/` | Baked captures (git-tracked sample: Joe's garage) |
-| `.../splatsample/Capture.kt` | Capture manifest loading from APK assets |
-| `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter |
-| `.../splatsample/SplatControlPanel.kt` | Capture names + thumbnails |
+| `SplatSample/app/src/main/assets/captures/` | Baked captures bundled in the APK (git-ignored; personal scan data) |
+| `.../splatsample/Capture.kt` | Capture loading: APK assets + device storage (`Documents/HyperscapeCaptures`, app files dir) |
+| `.../splatsample/SplatSampleActivity.kt` | Capture list, spawn/recenter, Documents permission |
+| `.../splatsample/SplatControlPanel.kt` | Scrollable capture picker + thumbnails |
