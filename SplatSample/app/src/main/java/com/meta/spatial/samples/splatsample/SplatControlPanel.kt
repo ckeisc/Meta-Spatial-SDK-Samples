@@ -25,7 +25,11 @@
 package com.meta.spatial.samples.splatsample
 
 import android.graphics.BitmapFactory
+import android.graphics.Outline
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.view.View
+import android.view.ViewOutlineProvider
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -61,8 +65,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -76,6 +82,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.io.File
+import kotlin.math.roundToInt
 import com.meta.spatial.uiset.theme.LocalColorScheme
 import com.meta.spatial.uiset.theme.SpatialColorScheme
 import com.meta.spatial.uiset.theme.SpatialTheme
@@ -200,10 +207,22 @@ fun ControlPanel(
               // assets; then the built-in drawable previews used by the demo
               // splats.
               if (videoFile != null) {
+                // Video tiles manage their own clipping/border in view-land
+                // (see VideoThumbnailTile): Compose clip()/border() modifiers
+                // can't affect an embedded Android view.
                 VideoThumbnailTile(
                     videoFile = videoFile,
                     contentDescription = "Flyby preview of $option",
-                    modifier = imageModifier,
+                    modifier =
+                        Modifier.fillMaxWidth()
+                            .height(200.dp)
+                            .alpha(imageAlpha),
+                    isSelected = isSelected,
+                    clickEnabled = isPanelInteractive.value,
+                    onClick = {
+                      loadSplatFunction(option)
+                      selectedIndex.value = index
+                    },
                 )
               } else {
                 // Static thumbnail (or placeholder) for non-video tiles.
@@ -279,14 +298,33 @@ fun ControlPanel(
  * The tile shows the video's first frame while idle; it auto-plays (muted,
  * looping) only while the cursor hovers the tile, and pauses when the cursor
  * leaves. The ExoPlayer is released when the tile leaves the composition.
+ *
+ * An embedded Android view doesn't obey Compose draw modifiers, so three
+ * things are done in view-land instead:
+ * - PlayerView defaults to a SurfaceView, whose private window surface does
+ *   not track spatial panel transforms (misaligned video). A TextureView
+ *   composites inside the normal view hierarchy instead.
+ * - Compose clip() cannot clip an embedded view: rounded corners come from a
+ *   ViewOutlineProvider + clipToOutline.
+ * - A Compose border() modifier would draw UNDER the video; the selection
+ *   border is the PlayerView's foreground drawable, which paints above it.
  */
 @Composable
 fun VideoThumbnailTile(
     videoFile: File,
     contentDescription: String,
     modifier: Modifier = Modifier,
+    isSelected: Boolean,
+    clickEnabled: Boolean,
+    onClick: () -> Unit,
 ) {
   val context = LocalContext.current
+  val density = LocalDensity.current
+  val cornerPx = with(density) { 12.dp.toPx() }
+  val borderWidthPx = with(density) { (if (isSelected) 4.dp else 2.dp).toPx() }
+  val borderColor =
+      if (isSelected) Color(0xFF1877F2) else LocalColorScheme.current.primaryAlphaBackground
+
   val exoPlayer = remember(videoFile.absolutePath) {
     ExoPlayer.Builder(context).build().apply {
       setMediaItem(MediaItem.fromUri(Uri.fromFile(videoFile)))
@@ -306,16 +344,43 @@ fun VideoThumbnailTile(
     if (isHovered) exoPlayer.play() else exoPlayer.pause()
   }
 
+  // Rounded-rect stroke painted above the video (see kdoc above).
+  val borderDrawable = remember(cornerPx) {
+    GradientDrawable().apply {
+      shape = GradientDrawable.RECTANGLE
+      cornerRadius = cornerPx
+      setColor(Color.TRANSPARENT.toArgb())
+    }
+  }
+
   AndroidView(
       factory = { ctx ->
         PlayerView(ctx).apply {
           setPlayer(exoPlayer)
           useController = false
+          this.contentDescription = contentDescription
           // Crop to fill the tile like the image previews (ContentScale.Crop).
           resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+          // SurfaceView punches its own hole in the window; TextureView
+          // composites with the panel.
+          setSurfaceType(PlayerView.SURFACE_TYPE_TEXTURE_VIEW)
+          // Clip the embedded view to the tile's rounded corners.
+          outlineProvider =
+              object : ViewOutlineProvider() {
+                override fun getOutline(view: View, outline: Outline) {
+                  outline.setRoundRect(0, 0, view.width, view.height, cornerPx)
+                }
+              }
+          clipToOutline = true
+          foreground = borderDrawable
         }
       },
-      modifier = modifier.hoverable(interactionSource = interactionSource),
+      update = { borderDrawable.setStroke(borderWidthPx.roundToInt(), borderColor.toArgb()) },
+      modifier =
+          modifier.hoverable(interactionSource = interactionSource).clickable(
+              enabled = clickEnabled,
+              onClick = onClick,
+          ),
   )
 }
 
