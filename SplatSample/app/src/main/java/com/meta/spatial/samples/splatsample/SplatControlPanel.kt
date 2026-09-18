@@ -30,6 +30,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.view.View
 import android.view.ViewOutlineProvider
+import android.view.LayoutInflater
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -79,7 +80,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import java.io.File
 import kotlin.math.roundToInt
@@ -349,22 +349,20 @@ fun VideoThumbnailTile(
     GradientDrawable().apply {
       shape = GradientDrawable.RECTANGLE
       cornerRadius = cornerPx
-      setColor(Color.TRANSPARENT.toArgb())
+      setColor(Color.Transparent.toArgb())
     }
   }
 
   AndroidView(
       factory = { ctx ->
-        PlayerView(ctx).apply {
+        // Inflated from XML: surface_type is an XML-only attribute in
+        // Media3 (no programmatic setter); texture_view keeps the video
+        // composited with the panel instead of a misaligned SurfaceView hole.
+        (LayoutInflater.from(ctx).inflate(R.layout.video_tile_player, null) as PlayerView).apply {
           setPlayer(exoPlayer)
-          useController = false
           this.contentDescription = contentDescription
-          // Crop to fill the tile like the image previews (ContentScale.Crop).
-          resizeMode = AspectRatioFrameLayout.RESIZE_MODE_ZOOM
-          // SurfaceView punches its own hole in the window; TextureView
-          // composites with the panel.
-          setSurfaceType(PlayerView.SURFACE_TYPE_TEXTURE_VIEW)
-          // Clip the embedded view to the tile's rounded corners.
+          // Clip the embedded view to the tile's rounded corners
+          // (Compose clip() cannot clip an embedded Android view).
           outlineProvider =
               object : ViewOutlineProvider() {
                 override fun getOutline(view: View, outline: Outline) {
